@@ -4,7 +4,8 @@
 #include <unistd.h>
 
 typedef struct {
-  short *data;
+  char channels;
+  signed short *data;
   int len;
   int _cb_pos;
   char _cb_lock;
@@ -14,17 +15,19 @@ void sleep_ms(int ms) {
   usleep(ms * 1000);
 }
 
-long long timespec_diff(struct timespec *start, struct timespec *end) {
-    long long diff_sec = end->tv_sec - start->tv_sec;
-    long long diff_nsec = end->tv_nsec - start->tv_nsec;
+long long timespec_diff(struct timespec *begin, struct timespec *end) {
+    long long diff_sec = end->tv_sec - begin->tv_sec;
+    long long diff_nsec = end->tv_nsec - begin->tv_nsec;
     
     // Adjust if the difference in nanoseconds is negative
     if (diff_nsec < 0) {
         diff_sec--;
-        diff_nsec += 1000000000; // 1 second in nanoseconds
+        // 1 second in nanoseconds
+        diff_nsec += 1000000000;
     }
 
-    return diff_sec * 1000000000 + diff_nsec; // Convert seconds to nanoseconds
+    // Convert seconds to nanoseconds
+    return diff_sec * 1000000000 + diff_nsec;
 }
 
 //#define CT CLOCK_PROCESS_CPUTIME_ID
@@ -55,7 +58,9 @@ char sp = 0;
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
-int samplerate = 44100;
+#define SAMPLERATE (44100)
+#define CHANNELS (2)
+
 int buffersize = 512;
 
 uint64_t cb_count = 0;
@@ -66,10 +71,10 @@ audio_buffer null_playback;
 audio_buffer *cb_capture;
 audio_buffer *cb_playback;
 
-void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frame_count) {
+void exaudio_data_cb(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frame_count) {
   //clock_gettime(CT, &st[sp&STM].t0);
 
-  if (cb_playback && cb_playback->data) {
+  if (cb_playback && cb_playback->_cb_lock && cb_playback->data) {
     int offset = cb_playback->_cb_pos;
     short int *poke = (short *)pOutput;
     for (int i=0; i<frame_count; i++) {
@@ -78,7 +83,10 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
       offset++;
     }
     cb_playback->_cb_pos += frame_count;
-    if (offset > cb_playback->len) cb_playback->_cb_lock = 0;
+    if (offset > cb_playback->len) {
+      cb_playback->_cb_pos = 0;
+      cb_playback->_cb_lock = 0;
+    }
   }
 
   if (cb_capture) {
@@ -89,6 +97,37 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     //return;
   }
   cb_count++;
+}
+
+
+void exaudio_notification_cb(const ma_device_notification* pNotification) {
+  if (pNotification) {
+    switch (pNotification->type) {
+      case ma_device_notification_type_started:
+        puts("STARTED");
+        break;
+      case ma_device_notification_type_stopped:
+        puts("STOPPED");
+        break;
+      case ma_device_notification_type_rerouted:
+        puts("REROUTED");
+        break;
+      case ma_device_notification_type_interruption_began:
+        puts("INTERRUPT BEGIN");
+        break;
+      case ma_device_notification_type_interruption_ended:
+        puts("INTERRUPT END");
+        break;
+      case ma_device_notification_type_unlocked:
+        puts("UNLOCKED");
+        break;
+      default:
+        printf("unknown notification %d\n", pNotification->type);
+        break;
+    }
+  } else {
+    puts("NULL NOTIFICAITON");
+  }
 }
 
 ma_device_config config;
@@ -128,7 +167,7 @@ void list_devices(void) {
   }
 }
 
-#define STEP_MS (500)
+#define STEP_MS (125)
 
 int main(int argc, char *argv[]) {
   printf("miniaudio version %s\n", ma_version_string());
@@ -145,7 +184,10 @@ int main(int argc, char *argv[]) {
   sleep_ms(STEP_MS);
 
   if (ma_context_get_devices(&context,
-    &pPlaybackInfos, &playbackCount, &pCaptureInfos, &captureCount) != MA_SUCCESS) {
+    &pPlaybackInfos,
+    &playbackCount,
+    &pCaptureInfos,
+    &captureCount) != MA_SUCCESS) {
     printf("failed to get I/O device list\n");
     exit(1);
   }
@@ -174,7 +216,7 @@ int main(int argc, char *argv[]) {
     if (n >= 0 && n <= capmax) capture = n;
   }
 
-  printf("I/O info with playback : %d capture : %d\n", playback, capture);
+  printf("I/O info playback=%d capture=%d\n", playback, capture);
 
   puts("=> ma_device_config_init");
   sleep_ms(STEP_MS);
@@ -190,9 +232,10 @@ int main(int argc, char *argv[]) {
     config.capture.pDeviceID = &pCaptureInfos[capture].id;
   }
   config.playback.format   = ma_format_s16;
-  config.playback.channels = 2;
-  config.sampleRate        = samplerate;
-  config.dataCallback      = data_callback;
+  config.playback.channels = CHANNELS;
+  config.sampleRate        = SAMPLERATE;
+  config.dataCallback      = exaudio_data_cb;
+  config.notificationCallback = exaudio_notification_cb;
   config.pUserData         = custom_data;
 
   if (capture >= 0) {
@@ -222,15 +265,40 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 
+  audio_buffer wave;
+
+#define WAVE_SEC (3)
+#define WAVE_LEN (SAMPLERATE * CHANNELS * WAVE_SEC)
+
+  signed short data[WAVE_LEN];
+  wave.channels = CHANNELS;
+  wave.data = (signed short *)&data;
+  wave.len = WAVE_LEN;
+  wave._cb_pos = 0;
+
+  int j = 0;
+  for (int i=0; i < (WAVE_LEN/CHANNELS); i+=CHANNELS) {
+    data[j++] = i / 100;
+    data[j++] = i / 100;
+  }
+
   // do stuff for 60 seconds...
   for (int i=0; i<60; i++) {
-    printf("%d %ld frames * %d * %ld = %ld bytes...\n",
+    if ((i % 5) == 0) {
+      puts("TRIGGER");
+      if (wave._cb_lock == 0) {
+        wave._cb_pos = 0;
+        wave._cb_lock = 1;
+        cb_playback = &wave;
+      } else {
+        puts("LOCKED");
+      }
+    }
+    
+    printf("%d %ld frames -> pos:%d\n",
       i,
-      cb_count,
-      buffersize,
-      sizeof(short),
-      cb_count * buffersize * sizeof(short));
-    sleep_ms(1000);
+      cb_count, wave._cb_pos);
+    sleep_ms(500);
   }
   
   // stop audio processing
