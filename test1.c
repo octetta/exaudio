@@ -6,9 +6,8 @@
 typedef struct {
   short *data;
   int len;
-  int _pos;
-  char _user_locked;
-  char _ma_locked;
+  int _cb_pos;
+  char _cb_lock;
 } audio_buffer;
 
 void sleep_ms(int ms) {
@@ -37,8 +36,7 @@ typedef struct {
     struct timespec t1;
     struct timespec t2;
     struct timespec t3;
-    unsigned int callback_count;
-    unsigned int zero_run;
+    unsigned int cb_count;
 } tracker_t;
 
 #define STC 8
@@ -60,16 +58,37 @@ char sp = 0;
 int samplerate = 44100;
 int buffersize = 512;
 
-uint64_t callback_count = 0;
+uint64_t cb_count = 0;
+
+audio_buffer null_capture;
+audio_buffer null_playback;
+
+audio_buffer *cb_capture;
+audio_buffer *cb_playback;
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frame_count) {
   //clock_gettime(CT, &st[sp&STM].t0);
+
+  if (cb_playback && cb_playback->data) {
+    int offset = cb_playback->_cb_pos;
+    short int *poke = (short *)pOutput;
+    for (int i=0; i<frame_count; i++) {
+      if (offset > cb_playback->len) break;
+      poke[i] = cb_playback->data[offset];
+      offset++;
+    }
+    cb_playback->_cb_pos += frame_count;
+    if (offset > cb_playback->len) cb_playback->_cb_lock = 0;
+  }
+
+  if (cb_capture) {
+  }
   
   if (frame_count != buffersize) {
     //printf("AUGH\n");
-    return;
+    //return;
   }
-  callback_count++;
+  cb_count++;
 }
 
 ma_device_config config;
@@ -207,10 +226,10 @@ int main(int argc, char *argv[]) {
   for (int i=0; i<60; i++) {
     printf("%d %ld frames * %d * %ld = %ld bytes...\n",
       i,
-      callback_count,
+      cb_count,
       buffersize,
       sizeof(short),
-      callback_count * buffersize * sizeof(short));
+      cb_count * buffersize * sizeof(short));
     sleep_ms(1000);
   }
   
