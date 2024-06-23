@@ -1,4 +1,4 @@
-LIB += -lpthread  -lm 
+LIB += -lpthread -lm 
 
 ifeq ($(shell uname -s), Darwin)
 LIB += -framework AudioUnit -framework CoreAudio -framework CoreFoundation

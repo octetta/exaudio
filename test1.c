@@ -1,3 +1,4 @@
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <time.h>
@@ -8,6 +9,7 @@ typedef struct {
   signed short *data;
   int len;
   int _cb_pos;
+  char _cb_trigger;
   char _cb_lock;
 } audio_buffer;
 
@@ -71,31 +73,45 @@ audio_buffer null_playback;
 audio_buffer *cb_capture;
 audio_buffer *cb_playback;
 
-void exaudio_data_cb(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frame_count) {
+void exaudio_data_cb(
+  ma_device* pDevice,
+  void* pOutput,
+  const void* pInput,
+  ma_uint32 frame_count) {
+
+  if (frame_count != buffersize) {
+    printf("AUGH\n");
+    return;
+  }
+
   //clock_gettime(CT, &st[sp&STM].t0);
 
+  short int *poke = (short *)pOutput;
+
+  if (cb_playback && cb_playback->_cb_trigger) {
+    cb_playback->_cb_lock = 1;
+    cb_playback->_cb_trigger = 0;
+  }
+
   if (cb_playback && cb_playback->_cb_lock && cb_playback->data) {
-    int offset = cb_playback->_cb_pos;
-    short int *poke = (short *)pOutput;
+    int ptr = 0;
     for (int i=0; i<frame_count; i++) {
-      if (offset > cb_playback->len) break;
-      poke[i] = cb_playback->data[offset];
-      offset++;
-    }
-    cb_playback->_cb_pos += frame_count;
-    if (offset > cb_playback->len) {
-      cb_playback->_cb_pos = 0;
-      cb_playback->_cb_lock = 0;
+      for (int c=0; c<CHANNELS; c++) {
+        poke[ptr++] = cb_playback->data[cb_playback->_cb_pos++];
+        if (cb_playback->_cb_pos > cb_playback->len) {
+          cb_playback->_cb_pos = 0;
+          cb_playback->_cb_lock = 0;
+          goto capture;
+        }
+      }
     }
   }
+
+  capture:
 
   if (cb_capture) {
   }
   
-  if (frame_count != buffersize) {
-    //printf("AUGH\n");
-    //return;
-  }
   cb_count++;
 }
 
@@ -133,7 +149,7 @@ void exaudio_notification_cb(const ma_device_notification* pNotification) {
 ma_device_config config;
 ma_device device;
 
-unsigned char custom_data[4096];
+unsigned char custom_data[2048];
 
 ma_context context;
 
@@ -169,6 +185,48 @@ void list_devices(void) {
 
 #define STEP_MS (125)
 
+#define SIGN(x) ((x > 0) - (x < 0))
+
+void mkwave(audio_buffer *b, float hz, float gain) {
+  int duration = b->len / CHANNELS;
+  float y, gy;
+  int j = 0;
+  // starts at 0, moving more positive
+  for (int i = 0; i < duration; i++) {
+    y = sin(hz * (2 * M_PI) * i / SAMPLERATE);
+    gy = y * gain;
+    signed short iy = 32700 * y;
+    b->data[j++] = iy;
+    b->data[j++] = iy;
+    //fprintf(stderr, "%g\n", y);
+    //fprintf(stderr, "%d\n", iy);
+  }
+#if 0
+  // find last sample that crosses zero going positive
+  signed short ly;
+  char first = 1;
+  for (int i = b->len-1; i >= 0; i--) {
+    signed short cy = b->data[i];
+    if (first) {
+      ly = cy;
+      first = 0;
+      continue;
+    }
+    if (ly > cy) {
+      if ((SIGN(ly) > 0) && (SIGN(cy) < 0)) {
+        printf("zero-cross downgoing at [%d]\n", i);
+        b->len = i-1;
+        break;
+      }
+    }
+    ly = b->data[i];
+  }
+#endif
+  printf("hz:%g gain:%g\n", hz, gain);
+  //printf("b->len:%d duration:%d j:%d\n", b->len, b->len / CHANNELS, j);
+
+}
+
 int main(int argc, char *argv[]) {
   printf("miniaudio version %s\n", ma_version_string());
 
@@ -194,7 +252,7 @@ int main(int argc, char *argv[]) {
 
   list_devices();
 
-  if (argc < 2) {
+  if (argc == 1) {
     printf("usage: %s out-device in-device\n", argv[0]);
     ma_device_uninit(&device);
     ma_context_uninit(&context);
@@ -205,6 +263,8 @@ int main(int argc, char *argv[]) {
 
 #define PLAYBACK_ARG (1)
 #define CAPTURE_ARG (2)
+#define HZ_ARG (3)
+#define GAIN_ARG (4)
   
   if (argc > PLAYBACK_ARG) {
     n = atoi(argv[PLAYBACK_ARG]);
@@ -267,38 +327,53 @@ int main(int argc, char *argv[]) {
 
   audio_buffer wave;
 
-#define WAVE_SEC (3)
-#define WAVE_LEN (SAMPLERATE * CHANNELS * WAVE_SEC)
+#define WAVE_TIME_TOP (2)
+#define WAVE_TIME_BOT (1)
+#define WAVE_SAMPLES ((SAMPLERATE * WAVE_TIME_TOP) / WAVE_TIME_BOT)
 
-  signed short data[WAVE_LEN];
+  signed short data[WAVE_SAMPLES * CHANNELS];
+
+  printf("WAVE_SAMPLES:%d * CHANNELS:%d = %d\n",
+    WAVE_SAMPLES,
+    CHANNELS,
+    WAVE_SAMPLES*CHANNELS);
+  printf("sizeof(data)/sizeof(signed short) = %ld\n",
+    sizeof(data) / sizeof(signed short));
+
   wave.channels = CHANNELS;
   wave.data = (signed short *)&data;
-  wave.len = WAVE_LEN;
+  wave.len = WAVE_SAMPLES * CHANNELS;
   wave._cb_pos = 0;
 
-  int j = 0;
-  for (int i=0; i < (WAVE_LEN/CHANNELS); i+=CHANNELS) {
-    data[j++] = i / 100;
-    data[j++] = i / 100;
+  float hz = 440.0;
+  float gain = 0.5;
+
+  if (argc > HZ_ARG) {
+    hz = atof(argv[HZ_ARG]);
   }
 
-  // do stuff for 60 seconds...
-  for (int i=0; i<60; i++) {
-    if ((i % 5) == 0) {
+  if (argc > GAIN_ARG) {
+    gain = atof(argv[GAIN_ARG]);
+  }
+
+  mkwave(&wave, hz, gain);
+  printf("len:%d\n", wave.len);
+
+  // do stuff for 10 seconds...
+  for (int i=0; i<10; i++) {
+
+    if ((i&1) && wave._cb_lock == 0) {
       puts("TRIGGER");
-      if (wave._cb_lock == 0) {
-        wave._cb_pos = 0;
-        wave._cb_lock = 1;
-        cb_playback = &wave;
-      } else {
-        puts("LOCKED");
-      }
+      wave._cb_pos = 0;
+      wave._cb_trigger = 1;
+      cb_playback = &wave;
     }
     
-    printf("%d %ld frames -> pos:%d\n",
-      i,
-      cb_count, wave._cb_pos);
-    sleep_ms(500);
+    printf("#%d (%ld cbs @ %d) -> (%d) pos:%d\n",
+      i, cb_count, buffersize,
+      wave._cb_lock,
+      wave._cb_pos);
+    sleep_ms(1000);
   }
   
   // stop audio processing
