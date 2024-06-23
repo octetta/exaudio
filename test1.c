@@ -8,6 +8,7 @@ typedef struct {
   char channels;
   signed short *data;
   int len;
+  char loop;
   int _cb_pos;
   char _cb_trigger;
   char _cb_lock;
@@ -100,6 +101,7 @@ void exaudio_data_cb(
         poke[ptr++] = cb_playback->data[cb_playback->_cb_pos++];
         if (cb_playback->_cb_pos > cb_playback->len) {
           cb_playback->_cb_pos = 0;
+          if (cb_playback->loop) continue;
           cb_playback->_cb_lock = 0;
           goto capture;
         }
@@ -343,6 +345,7 @@ int main(int argc, char *argv[]) {
   wave.channels = CHANNELS;
   wave.data = (signed short *)&data;
   wave.len = WAVE_SAMPLES * CHANNELS;
+  wave.loop = 1;
   wave._cb_pos = 0;
 
   float hz = 440.0;
