@@ -1,5 +1,6 @@
 #include <math.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
@@ -9,15 +10,23 @@ typedef struct {
   signed short *data;
   int len;
   char loop;
-  int repeat;
-  int _cb_repeat;
+  int limit;
+  int _cb_limit;
   int _cb_pos;
   char _cb_trigger;
-  char _cb_lock;
-
-  int phase_accumulator;
-  int phase_increment;
+  char playing;
   float frequency;
+
+  // for DDS method of waveform playback
+  char dds;
+  float dds_acc;
+  float dds_inc;
+  uint32_t table_index;
+  uint32_t table_size;
+  float dds_frequency;
+
+  //float gain_left;
+  //float gain_right;
 
 } audio_buffer;
 
@@ -79,7 +88,7 @@ audio_buffer null_capture;
 audio_buffer null_playback;
 
 audio_buffer *cb_capture;
-audio_buffer *cb_output;
+audio_buffer *cb_out;
 
 void exaudio_data_cb(
   ma_device* pDevice,
@@ -96,32 +105,58 @@ void exaudio_data_cb(
 
   short int *poke = (short *)pOutput;
 
-  if (cb_output && cb_output->_cb_trigger) {
-    cb_output->_cb_lock = 1;
-    cb_output->_cb_trigger = 0;
-    cb_output->_cb_repeat = cb_output->repeat;
+  // trigger sets things up and advances to playing state
+
+  if (cb_out && !cb_out->playing && cb_out->_cb_trigger) {
+    cb_out->playing = 1;
+    cb_out->_cb_trigger = 0;
+    cb_out->_cb_limit = cb_out->limit;
+    
+    if (cb_out->dds) {
+      cb_out->table_index = 0;
+      cb_out->dds_acc = 0.0;
+      cb_out->dds_inc = (cb_out->dds_frequency * (float)cb_out->table_size) / (float)SAMPLERATE;
+      //printf("dds_inc = %g\n", cb_out->dds_inc);
+    }
   }
 
-  if (cb_output && cb_output->_cb_lock && cb_output->data) {
+  if (cb_out && cb_out->playing && cb_out->data) {
     int ptr = 0;
     for (int i=0; i<frame_count; i++) {
-      for (int c=0; c<CHANNELS; c++) {
-        poke[ptr++] = cb_output->data[cb_output->_cb_pos++];
-        if (cb_output->_cb_pos > cb_output->len) {
-          cb_output->_cb_pos = 0;
-          if (cb_output->loop) {
-            if (cb_output->repeat) {
-              cb_output->_cb_repeat--;
-              if (cb_output->_cb_repeat <= 0) {
-                cb_output->_cb_repeat = 0;
-                cb_output->_cb_lock = 0;
-                goto capture;
-              }
-            }
-            continue;
+      
+      if (cb_out->dds) {
+        uint32_t x = cb_out->table_index * CHANNELS;
+        for (int c=0; c<CHANNELS; c++) {
+          poke[ptr++] = cb_out->data[x++];
+        }
+        cb_out->dds_acc += cb_out->dds_inc;
+        cb_out->table_index = (uint32_t)cb_out->dds_acc;
+        if (cb_out->table_index > cb_out->table_size) {
+          cb_out->table_index = 0;
+          if (!cb_out->loop) {
+            cb_out->playing = 0;
+            goto capture;
           }
-          cb_output->_cb_lock = 0;
-          goto capture;
+        }
+      } else {
+        for (int c=0; c<CHANNELS; c++) {
+          poke[ptr++] = cb_out->data[cb_out->_cb_pos++];
+          if (cb_out->_cb_pos > cb_out->len) {
+            cb_out->_cb_pos = 0;
+            if (cb_out->loop) {
+              if (cb_out->limit) {
+                cb_out->_cb_limit--;
+                if (cb_out->_cb_limit <= 0) {
+                  cb_out->_cb_limit = 0;
+                  cb_out->playing = 0;
+                  goto capture;
+                }
+              }
+              continue;
+            }
+            cb_out->playing = 0;
+            goto capture;
+          }
         }
       }
     }
@@ -203,19 +238,20 @@ void list_devices(void) {
   }
 }
 
-#define STEP_MS (125)
+#define STEP_MS (10)
 
 #define SIGN(x) ((x > 0) - (x < 0))
 
 void mkwave(audio_buffer *b, float hz, float gain) {
   int duration = b->len / CHANNELS;
+  b->frequency = hz;
   float y, gy;
   int j = 0;
   // starts at 0, moving more positive
   for (int i = 0; i < duration; i++) {
     y = sin(hz * (2 * M_PI) * i / SAMPLERATE);
     gy = y * gain;
-    signed short iy = 32700 * y;
+    signed short iy = 32700 * gy;
     b->data[j++] = iy;
     b->data[j++] = iy;
     //fprintf(stderr, "%g\n", y);
@@ -247,13 +283,15 @@ void mkwave(audio_buffer *b, float hz, float gain) {
 
 }
 
-int exa_trigger(audio_buffer *b) {
+int exa_trigger(audio_buffer *b, int loop, int limit) {
   if (!b) return -1;
-  if (b->_cb_lock == 0) {
-    puts("TRIGGER");
+  if (b->playing == 0) {
+    b->table_index = 0;
+    b->loop = loop;
+    b->limit = limit;
     b->_cb_pos = 0;
     b->_cb_trigger = 1;
-    cb_output = b;
+    cb_out = b;
     return 0;
   }
   return -1;
@@ -267,12 +305,14 @@ audio_buffer *exa_new_wave(int samples) {
       w->channels = CHANNELS;
       w->data = data;
       w->len = samples * CHANNELS;
+      w->table_size = samples;
       w->loop = 0;
-      w->repeat = 0;
+      w->limit = 0;
       w->_cb_trigger = 0;
-      w->_cb_lock = 0;
+      w->playing = 0;
       w->_cb_pos = 0;
-      w->_cb_repeat = 0;
+      w->_cb_limit = 0;
+      w->dds = 0;
       return w;
     } else {
       free(w);
@@ -327,7 +367,7 @@ int main(int argc, char *argv[]) {
 #define TOP_ARG (5)
 #define BOT_ARG (6)
 #define LOOP_ARG (7)
-#define REPEAT_ARG (8)
+#define LIMIT_ARG (8)
   
   if (argc > PLAYBACK_ARG) {
     n = atoi(argv[PLAYBACK_ARG]);
@@ -339,7 +379,7 @@ int main(int argc, char *argv[]) {
     if (n >= 0 && n <= capmax) capture = n;
   }
 
-  printf("I/O info playback=%d capture=%d\n", playback, capture);
+  printf("PLAYBACK=%d CAPTURE=%d\n", playback, capture);
 
   puts("=> ma_device_config_init");
   sleep_ms(STEP_MS);
@@ -399,6 +439,8 @@ int main(int argc, char *argv[]) {
     gain = atof(argv[GAIN_ARG]);
   }
 
+  printf("HZ=%g GAIN=%g\n", hz, gain);
+
   int top = 1;
   int bot = 1;
 
@@ -410,38 +452,77 @@ int main(int argc, char *argv[]) {
     bot = atoi(argv[BOT_ARG]);
   }
 
+  printf("TOP=%d BOT=%d (%g seconds / %d samples)\n",
+    top, bot, (float)top/(float)bot,
+    top * SAMPLERATE / bot);
+
   audio_buffer *wave = exa_new_wave(exa_samples_per_time(top, bot));
 
   int loop = 0;
-  int repeat = 0;
+  int limit = 0;
 
   if (argc > LOOP_ARG) {
     loop = atoi(argv[LOOP_ARG]);
   }
 
-  if (argc > REPEAT_ARG) {
-    repeat = atoi(argv[REPEAT_ARG]);
+  if (argc > LIMIT_ARG) {
+    limit = atoi(argv[LIMIT_ARG]);
   }
 
+  printf("LOOP=%d LIMIT=%d\n", loop, limit);
+
   wave->loop = loop;
-  wave->repeat = repeat;
+  wave->limit = limit;
 
   mkwave(wave, hz, gain);
 
-  printf("len:%d\n", wave->len);
+  printf("WAVE TABLE LEN = %d\n", wave->len);
+  printf("WAVE TABLE CHANNELS = %d\n", wave->channels);
 
+#if 0
   // do stuff for 10 seconds...
   for (int i=0; i<10; i++) {
 
-    if (i&1) exa_trigger(wave);
+    if (i&1) exa_trigger(wave, loop, limit);
     
     printf("#%d (%ld cbs @ %d) -> lock:%d pos:%d #:%d\n",
       i, cb_count, buffersize,
-      wave->_cb_lock,
+      wave->playing,
       wave->_cb_pos,
-      wave->_cb_repeat);
+      wave->_cb_limit);
     sleep_ms(1000);
   }
+#endif
+  puts("no DDS");
+  exa_trigger(wave, loop, limit);
+  sleep_ms(2000);
+  
+  puts("with DDS");
+  wave->dds = 1;
+
+  puts("-> 5.0");
+  wave->playing = 0;
+  wave->dds_frequency = 5.0;
+  exa_trigger(wave, loop, limit);
+  sleep_ms(2000);
+  
+  puts("-> 1.0");
+  wave->playing = 0;
+  wave->dds_frequency = 1.0;
+  exa_trigger(wave, loop, limit);
+  sleep_ms(2000);
+  
+  puts("-> 2.0");
+  wave->playing = 0;
+  wave->dds_frequency = 2.0;
+  exa_trigger(wave, 1, limit);
+  sleep_ms(2000);
+  
+  puts("-> 0.5");
+  wave->playing = 0;
+  wave->dds_frequency = 0.5;
+  exa_trigger(wave, 1, limit);
+  sleep_ms(2000);
   
   // stop audio processing
   puts("=> ma_device_stop");
