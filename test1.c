@@ -211,7 +211,7 @@ void mkwave(audio_buffer *b, float hz, float gain, char loop) {
   for (int i = 0; i < duration; i++) {
     y = sin(hz * (2 * M_PI) * i / SAMPLERATE);
     gy = y * gain;
-    int16_t iy = 32700 * gy;
+    int16_t iy = 32767 * gy;
     b->data[j++] = iy;
   }
   if (loop) {
@@ -228,7 +228,7 @@ void mkwave(audio_buffer *b, float hz, float gain, char loop) {
       if (ly > cy) {
         if ((SIGN(ly) > 0) && (SIGN(cy) < 0)) {
           printf("zero-cross downgoing at [%d]\n", i);
-          b->len = i-1;
+          b->len = i;
           break;
         }
       }
