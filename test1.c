@@ -10,7 +10,7 @@
 #define I16MIN (-32767)
 
 typedef struct {
-  int16_t *data;
+  float *data;
   char loop;
   int limit;
   int _cb_limit;
@@ -99,12 +99,12 @@ void exaudio_data_cb(
     return;
   }
 
-  short int *peek = (short *)pInput;
+  float *peek = (float *)pInput;
 
   //clock_gettime(CT, &st[sp&STM].t0);
 
   playback:
-  short int *poke = (short *)pOutput;
+  float *poke = (float *)pOutput;
   int ptr = 0;
   for (int i=0; i<frame_count; i++) {
     poke[ptr++] = 0;
@@ -122,19 +122,17 @@ void exaudio_data_cb(
       int nptr = ptr;
       for (int i=0; i<frame_count; i++) {
         uint32_t x = (uint32_t)osc[n]->acc;
-        int32_t r = osc[n]->data[x];
-        int32_t a = poke[nptr+0];
-        int32_t b = poke[nptr+1];
-        int32_t c = a + r;
-        int32_t d = b + r;
-        if (c > I16MAX) c = I16MAX;
-        if (c < I16MIN) c = I16MIN;
-        if (d > I16MAX) d = I16MAX;
-        if (d < I16MIN) d = I16MIN;
+        float r = osc[n]->data[x];
+        float a = poke[nptr+0];
+        float b = poke[nptr+1];
+        float c = a + r;
+        float d = b + r;
         poke[nptr+0] = c;
         poke[nptr+1] = d;
         osc[n]->acc += osc[n]->inc;
-        if (osc[n]->acc > osc[n]->len) {
+        uint32_t iacc = (uint32_t)(osc[n]->acc + 0.5);
+        uint32_t ilen = (uint32_t)osc[n]->len;
+        if (osc[n]->acc > ilen) {
           if (osc[n]->loop) {
             osc[n]->acc = 0;
           } else {
@@ -236,17 +234,16 @@ void mkwave(audio_buffer *b, float hz, float gain, char find) {
   for (int i = 0; i < duration; i++) {
     y = sin(hz * (2 * M_PI) * i / SAMPLERATE);
     gy = y * gain;
-    int16_t iy = I16MAX * gy;
-    b->data[i] = iy;
+    b->data[i] = gy;
   }
   char found = 0;
   int found_index = 0;
   if (find) {
     // find last sample that crosses zero going positive
-    int16_t ly;
+    float ly;
     char first = 1;
     for (int i = b->len-1; i >= 0; i--) {
-      int16_t cy = b->data[i];
+      float cy = b->data[i];
       if (first) {
         ly = cy;
         first = 0;
@@ -272,18 +269,24 @@ void mkwave(audio_buffer *b, float hz, float gain, char find) {
   printf("hz:%g gain:%g\n", hz, gain);
 }
 
-int exa_wave_start(audio_buffer *b, int loop, int limit) {
+int exa_wave_start(audio_buffer *b) {
   if (!b) return -1;
   if (b->playing == 0) {
     b->acc = 0;
-    b->loop = loop;
-    b->limit = limit;
     // b->inc = (b->dds_frequency * b->len) / (float)SAMPLERATE;
     b->_cb_trigger = 1;
     return 0;
   }
   return -1;
 }
+
+int exa_wave_loop(audio_buffer *b, char loop, int limit) {
+  if (!b) return -1;
+  b->loop = loop;
+  b->limit = limit;
+  return 0;
+}
+
 
 int exa_wave_frequency(audio_buffer *b, float hz) {
   if (!b) return -1;
@@ -301,7 +304,7 @@ int exa_wave_stop(audio_buffer *b) {
 audio_buffer *exa_new_wave(int samples) {
   audio_buffer *w = (audio_buffer *)malloc(sizeof(audio_buffer));
   if (w) {
-    int16_t *data = (int16_t *)malloc(sizeof(int16_t) * samples);
+    float *data = (float *)malloc(sizeof(float) * samples);
     if (data) {
       w->data = data;
       w->len = samples;
@@ -392,7 +395,8 @@ int main(int argc, char *argv[]) {
   if (capture >= 0) {
     config.capture.pDeviceID = &pCaptureInfos[capture].id;
   }
-  config.playback.format   = ma_format_s16;
+  //config.playback.format   = ma_format_s16;
+  config.playback.format   = ma_format_f32;
   config.playback.channels = CHANNELS;
   config.sampleRate        = SAMPLERATE;
   config.dataCallback      = exaudio_data_cb;
@@ -479,16 +483,17 @@ int main(int argc, char *argv[]) {
 
   mkwave(wave0, hz, gain, 1);
   exa_wave_frequency(wave0, 1);
-  exa_wave_start(wave0, 1, 0);
+  exa_wave_start(wave0);
   osc[0] = wave0;
 
-  mkwave(wave1, hz, gain, 1);
-  exa_wave_frequency(wave1, 2.1);
-  exa_wave_start(wave1, 1, 0);
-  //osc[1] = wave1;
+  mkwave(wave1, hz+0.01, gain, 1);
+  exa_wave_frequency(wave1, 1);
+  exa_wave_loop(wave1, 1, 0);
+  exa_wave_start(wave1);
+  osc[1] = wave1;
 
   for (int i=0; i<5; i++) {
-    if (i&1) exa_wave_start(wave0, loop, limit);
+    if (i&1) exa_wave_start(wave0);
     printf("#%d (%ld cbs @ %d) -> lock:%d #:%d\n",
       i, cb_count, buffersize,
       wave0->playing,
@@ -497,17 +502,31 @@ int main(int argc, char *argv[]) {
   }
   exa_wave_stop(wave0);
 
-  exa_wave_start(wave0, 1, limit);
-  sleep_ms(2000);
+  exa_wave_start(wave0);
+  for (int i=0; i<2; i++) {
+    for (float f = 1; f < 2; f+=0.01) {
+      exa_wave_frequency(wave0, f);
+      sleep_ms(2);
+    }
+    for (float f = 2; f > 1; f-=0.01) {
+      exa_wave_frequency(wave0, f);
+      sleep_ms(2);
+    }
+  }
   exa_wave_stop(wave0);
   
-  puts("-> 5.0");
-  exa_wave_frequency(wave0, 5);
-  exa_wave_start(wave0, 1, limit);
+  puts("-> 3.0");
+  exa_wave_loop(wave0, 1, 0);
+  exa_wave_frequency(wave0, 3);
+  exa_wave_start(wave0);
   sleep_ms(2000);
   
   puts("-> 1.0");
   exa_wave_frequency(wave0, 1);
+  sleep_ms(2000);
+  
+  puts("-> 1.01");
+  exa_wave_frequency(wave0, 1.01);
   sleep_ms(2000);
   
   puts("-> 2.0");
