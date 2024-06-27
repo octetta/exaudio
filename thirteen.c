@@ -5,17 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SAMPLE (44100)
-
 #define MAX_OSCILLATORS 16
-#define MAX_SAMPLE_FRAMES SAMPLE * 10  // Maximum sample length of 10 seconds at 48 kHz
+#define MAX_SAMPLE_FRAMES 48000 * 10  // Maximum sample length of 10 seconds at 48 kHz
 
 typedef enum {
     WAVEFORM_SQUARE,
     WAVEFORM_SINE,
     WAVEFORM_TRIANGLE,
     WAVEFORM_SAWTOOTH,
-    WAVEFORM_SAMPLE
+    WAVEFORM_SAMPLE,
+    WAVEFORM_PULSE
 } WaveformType;
 
 typedef struct {
@@ -31,18 +30,21 @@ typedef struct {
     float freqDecay;
     float freqSustain;
     float freqRelease;
-    float lfoFreq;
-    float lfoAmpDepth;
-    float lfoFreqDepth;
-    float lfoPhase;
     WaveformType waveformType;
-    WaveformType lfoType;
     int noteOn;
     int noteOff;
     float time;
     float releaseStartTime;
     float* sampleData;
     size_t sampleFrames;
+    float sampleOriginalSampleRate;
+    int enableAmpEnvelope;   // Flag to enable/disable amplitude envelope
+    int enableFreqEnvelope;  // Flag to enable/disable frequency envelope
+    int enablePWM;           // Flag to enable/disable pulse width modulation
+    float pulseWidth;        // Pulse width for pulse waveform
+    int ampLfoIndex;         // Index of the oscillator used for amplitude modulation
+    int freqLfoIndex;        // Index of the oscillator used for frequency modulation
+    int pwmLfoIndex;         // Index of the oscillator used for pulse width modulation
 } Oscillator;
 
 typedef struct {
@@ -60,9 +62,12 @@ float generate_waveform(Oscillator *osc, float phase, WaveformType type) {
             return 4.0f * fabsf(phase - 0.5f) - 1.0f;
         case WAVEFORM_SAWTOOTH:
             return 2.0f * (phase - floorf(phase + 0.5f));
+        case WAVEFORM_PULSE:
+            return phase < osc->pulseWidth ? 1.0f : -1.0f;
         case WAVEFORM_SAMPLE:
             if (osc->sampleData && osc->sampleFrames > 0) {
-                size_t index = (size_t)(phase * osc->sampleFrames);
+                // Adjust the phase increment according to the original sample rate
+                size_t index = (size_t)(phase * osc->sampleFrames * (osc->sampleOriginalSampleRate / osc->sampleRate));
                 index = index % osc->sampleFrames;
                 return osc->sampleData[index];
             }
@@ -72,13 +77,20 @@ float generate_waveform(Oscillator *osc, float phase, WaveformType type) {
     }
 }
 
-float lfo(Oscillator *osc) {
-    osc->lfoPhase += osc->lfoFreq / osc->sampleRate;
-    if (osc->lfoPhase >= 1.0f) osc->lfoPhase -= 1.0f;
-    return generate_waveform(osc, osc->lfoPhase, osc->lfoType);
+float get_lfo_value(OscillatorSystem *oscSystem, int lfoIndex) {
+    if (lfoIndex < 0 || lfoIndex >= oscSystem->numOscillators) {
+        return 0.0f;
+    }
+
+    Oscillator *lfoOsc = &oscSystem->oscillators[lfoIndex];
+    lfoOsc->phase += lfoOsc->baseFrequency / lfoOsc->sampleRate;
+    if (lfoOsc->phase >= 1.0f) lfoOsc->phase -= 1.0f;
+    return generate_waveform(lfoOsc, lfoOsc->phase, lfoOsc->waveformType);
 }
 
-float amplitude_envelope(Oscillator *osc) {
+float amplitude_envelope(OscillatorSystem *oscSystem, Oscillator *osc) {
+    if (!osc->enableAmpEnvelope) return 1.0f;
+
     float ampEnv = 0.0f;
     if (osc->noteOn) {
         if (osc->time < osc->ampAttack) {
@@ -96,10 +108,14 @@ float amplitude_envelope(Oscillator *osc) {
             ampEnv = 0.0f;
         }
     }
-    return ampEnv + osc->lfoAmpDepth * lfo(osc);
+
+    float lfoValue = get_lfo_value(oscSystem, osc->ampLfoIndex);
+    return ampEnv + 0.1f * lfoValue;  // Adjust the depth as needed
 }
 
-float frequency_envelope(Oscillator *osc) {
+float frequency_envelope(OscillatorSystem *oscSystem, Oscillator *osc) {
+    if (!osc->enableFreqEnvelope) return osc->baseFrequency;
+
     float freqEnv = osc->baseFrequency;
     if (osc->noteOn) {
         if (osc->time < osc->freqAttack) {
@@ -115,25 +131,31 @@ float frequency_envelope(Oscillator *osc) {
             freqEnv *= osc->freqSustain * (1.0f - t / osc->freqRelease);
         }
     }
-    return freqEnv * (1.0f + osc->lfoFreqDepth * lfo(osc));
+
+    float lfoValue = get_lfo_value(oscSystem, osc->freqLfoIndex);
+    return freqEnv * (1.0f + 0.1f * lfoValue);  // Adjust the depth as needed
 }
 
-float generate_oscillator(Oscillator *osc) {
-    float currentFrequency = frequency_envelope(osc);
+float generate_oscillator(OscillatorSystem *oscSystem, Oscillator *osc) {
+    float currentFrequency = frequency_envelope(oscSystem, osc);
+    if (osc->enablePWM) {
+        float lfoValue = get_lfo_value(oscSystem, osc->pwmLfoIndex);
+        osc->pulseWidth = 0.5f + 0.5f * lfoValue;  // Adjust the depth as needed
+    }
     float value = generate_waveform(osc, osc->phase, osc->waveformType);
     osc->phase += currentFrequency / osc->sampleRate;
     if (osc->phase >= 1.0f) osc->phase -= 1.0f;
-    return value * amplitude_envelope(osc) * osc->amplitude;
+    return value * amplitude_envelope(oscSystem, osc) * osc->amplitude;
 }
 
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     float* pOutputF32 = (float*)pOutput;
     OscillatorSystem* oscSystem = (OscillatorSystem*)pDevice->pUserData;
-    
+
     for (ma_uint32 i = 0; i < frameCount; ++i) {
         float sample = 0.0f;
         for (int j = 0; j < oscSystem->numOscillators; ++j) {
-            sample += generate_oscillator(&oscSystem->oscillators[j]);
+            sample += generate_oscillator(oscSystem, &oscSystem->oscillators[j]);
         }
         sample /= oscSystem->numOscillators; // Normalize to avoid clipping
         *pOutputF32++ = sample;
@@ -146,15 +168,11 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     (void)pInput;
 }
 
-float* load_sample(const char* filename, size_t* outSampleFrames) {
-    # if 0
-    float *sampleData = (float *)malloc(1024 * sizeof(float));
-    for (int i=0; i<1024; i++) {
-        sampleData[i] = (float)(i % 128);
-    }
-    *outSampleFrames = 1024/2;
-    return sampleData;
-    #else
+float* load_sample(const char* filename, size_t* outSampleFrames, float* outSampleRate) {
+    // Here you need to load the sample file and get its sample rate and sample frames.
+    // For simplicity, we'll assume the sample is in raw float format with a known sample rate.
+    // Replace this with actual code to load your sample correctly.
+
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Failed to open sample file.\n");
@@ -175,23 +193,24 @@ float* load_sample(const char* filename, size_t* outSampleFrames) {
     size_t framesRead = fread(sampleData, sizeof(float), fileSize / sizeof(float), file);
     fclose(file);
 
-    printf("framesRead = %d\n", framesRead);
     *outSampleFrames = framesRead;
+    *outSampleRate = 48000.0f; // Set this to the actual sample rate of your sample file
+
     return sampleData;
-    #endif
 }
 
 int main() {
     ma_result result;
     ma_device_config deviceConfig;
     ma_device device;
-    
+
     OscillatorSystem oscSystem = {0};
-    oscSystem.numOscillators = 3; // You can set this to any value up to MAX_OSCILLATORS
+    oscSystem.numOscillators = 16; // You can set this to any value up to MAX_OSCILLATORS
 
     // Load a sample file (replace "sample.raw" with your actual sample file)
     size_t sampleFrames;
-    float* sampleData = load_sample("sample.raw", &sampleFrames);
+    float sampleRate;
+    float* sampleData = load_sample("sample.raw", &sampleFrames, &sampleRate);
     if (!sampleData) {
         return -1;
     }
@@ -200,35 +219,38 @@ int main() {
         oscSystem.oscillators[i] = (Oscillator){
             .amplitude = 0.25f,
             .baseFrequency = 440.0f + i * 10.0f, // Slightly detune each oscillator
-            .sampleRate = (float)SAMPLE,
+            .sampleRate = 48000.0f,
             .phase = 0.0f,
-            .ampAttack = 0.1f * i,
+            .ampAttack = 0.1f,
             .ampDecay = 0.2f,
             .ampSustain = 0.7f,
             .ampRelease = 0.3f,
             .freqAttack = 0.1f,
             .freqDecay = 0.2f,
             .freqSustain = 0.7f,
-            .freqRelease = 5.3f,
-            .lfoFreq = i *1.0f + 1.0f, // 5 Hz LFO
-            .lfoAmpDepth = 0.1f, // 10% amplitude modulation
-            .lfoFreqDepth = 0.1f, // 10% frequency modulation
-            .lfoPhase = 0.0f,
+            .freqRelease = 0.3f,
             .waveformType = i == 0 ? WAVEFORM_SAMPLE : WAVEFORM_SQUARE, // First oscillator uses the sample
-            .lfoType = WAVEFORM_SINE,
             .noteOn = 1,
             .noteOff = 0,
             .time = 0.0f,
             .releaseStartTime = 0.0f,
             .sampleData = sampleData,
-            .sampleFrames = sampleFrames
+            .sampleFrames = sampleFrames,
+            .sampleOriginalSampleRate = sampleRate, // Store the original sample rate of the sample
+            .enableAmpEnvelope = 1, // Enable amplitude envelope by default
+            .enableFreqEnvelope = 1, // Enable frequency envelope by default
+            .enablePWM = 1, // Enable PWM by default
+            .pulseWidth = 0.5f, // Default pulse width
+            .ampLfoIndex = -1, // No amplitude LFO by default
+            .freqLfoIndex = -1, // No frequency LFO by default
+            .pwmLfoIndex = -1 // No PWM LFO by default
         };
     }
 
     deviceConfig = ma_device_config_init(ma_device_type_playback);
     deviceConfig.playback.format   = ma_format_f32;
     deviceConfig.playback.channels = 2;
-    deviceConfig.sampleRate        = SAMPLE;
+    deviceConfig.sampleRate        = 48000;
     deviceConfig.dataCallback      = data_callback;
     deviceConfig.pUserData         = &oscSystem;
 
@@ -246,12 +268,6 @@ int main() {
     }
 
     printf("Press Enter to quit...\n");
-    getchar();
-
-    for (int i = 0; i < oscSystem.numOscillators; ++i) {
-        oscSystem.oscillators[i].noteOff = 1;
-        oscSystem.oscillators[i].noteOn = 0;
-    }
     getchar();
 
     ma_device_uninit(&device);

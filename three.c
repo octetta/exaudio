@@ -58,14 +58,22 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     (void)pInput;
 }
 
-int main() {
+int main(int argc, char *argv[]) {
+    float amp = 0.25f;
+    if (argc > 1) {
+      amp = atof(argv[1]);
+    }
+    float freq = 440.0f;
+    if (argc > 2) {
+      freq = atof(argv[2]);
+    }
     ma_result result;
     ma_device_config deviceConfig;
     ma_device device;
     
     SquareWaveOscillator osc = {
-        .amplitude = 0.25f,
-        .frequency = 440.0f,
+        .amplitude = amp,
+        .frequency = freq,
         .sampleRate = 48000.0f,
         .phase = 0.0f,
         .attack = 0.1f,

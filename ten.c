@@ -5,17 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SAMPLE (44100)
+#define SR (44100)
 
 #define MAX_OSCILLATORS 16
-#define MAX_SAMPLE_FRAMES SAMPLE * 10  // Maximum sample length of 10 seconds at 48 kHz
+#define MAX_SAMPLE_FRAMES SR * 10  // Maximum sample length of 10 seconds at 48 kHz
 
 typedef enum {
     WAVEFORM_SQUARE,
     WAVEFORM_SINE,
     WAVEFORM_TRIANGLE,
     WAVEFORM_SAWTOOTH,
-    WAVEFORM_SAMPLE
+    WAVEFORM_SAMPLE,
+    WAVEFORM_END
 } WaveformType;
 
 typedef struct {
@@ -43,6 +44,7 @@ typedef struct {
     float releaseStartTime;
     float* sampleData;
     size_t sampleFrames;
+    float sampleOriginalSampleRate; // New field for the original sample rate of the sample
 } Oscillator;
 
 typedef struct {
@@ -62,7 +64,8 @@ float generate_waveform(Oscillator *osc, float phase, WaveformType type) {
             return 2.0f * (phase - floorf(phase + 0.5f));
         case WAVEFORM_SAMPLE:
             if (osc->sampleData && osc->sampleFrames > 0) {
-                size_t index = (size_t)(phase * osc->sampleFrames);
+                // Adjust the phase increment according to the original sample rate
+                size_t index = (size_t)(phase * osc->sampleFrames * (osc->sampleOriginalSampleRate / osc->sampleRate));
                 index = index % osc->sampleFrames;
                 return osc->sampleData[index];
             }
@@ -146,15 +149,11 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     (void)pInput;
 }
 
-float* load_sample(const char* filename, size_t* outSampleFrames) {
-    # if 0
-    float *sampleData = (float *)malloc(1024 * sizeof(float));
-    for (int i=0; i<1024; i++) {
-        sampleData[i] = (float)(i % 128);
-    }
-    *outSampleFrames = 1024/2;
-    return sampleData;
-    #else
+float* load_sample(const char* filename, size_t* outSampleFrames, float* outSampleRate) {
+    // Here you need to load the sample file and get its sample rate and sample frames.
+    // For simplicity, we'll assume the sample is in raw float format with a known sample rate.
+    // Replace this with actual code to load your sample correctly.
+    
     FILE* file = fopen(filename, "rb");
     if (!file) {
         printf("Failed to open sample file.\n");
@@ -175,60 +174,79 @@ float* load_sample(const char* filename, size_t* outSampleFrames) {
     size_t framesRead = fread(sampleData, sizeof(float), fileSize / sizeof(float), file);
     fclose(file);
 
-    printf("framesRead = %d\n", framesRead);
     *outSampleFrames = framesRead;
+    *outSampleRate = SR; // Set this to the actual sample rate of your sample file
+
     return sampleData;
-    #endif
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     ma_result result;
     ma_device_config deviceConfig;
     ma_device device;
     
     OscillatorSystem oscSystem = {0};
-    oscSystem.numOscillators = 3; // You can set this to any value up to MAX_OSCILLATORS
+    int n = 2;
+    oscSystem.numOscillators = n; // You can set this to any value up to MAX_OSCILLATORS
 
     // Load a sample file (replace "sample.raw" with your actual sample file)
     size_t sampleFrames;
-    float* sampleData = load_sample("sample.raw", &sampleFrames);
+    float sampleRate;
+    float* sampleData = load_sample("sample.raw", &sampleFrames, &sampleRate);
     if (!sampleData) {
         return -1;
     }
 
+    printf("WAVEFORM_END = %d\n", WAVEFORM_END);
     for (int i = 0; i < oscSystem.numOscillators; ++i) {
+        int t = 0;
+        if (i == 0) {
+          t = WAVEFORM_SAMPLE;
+        } else {
+          t = i % WAVEFORM_SAMPLE;
+        }
+        printf("[%d] waveformType = %d\n", i, t);
         oscSystem.oscillators[i] = (Oscillator){
             .amplitude = 0.25f,
             .baseFrequency = 440.0f + i * 10.0f, // Slightly detune each oscillator
-            .sampleRate = (float)SAMPLE,
+            .sampleRate = SR,
             .phase = 0.0f,
-            .ampAttack = 0.1f * i,
+            .ampAttack = 0.1f,
             .ampDecay = 0.2f,
             .ampSustain = 0.7f,
             .ampRelease = 0.3f,
             .freqAttack = 0.1f,
             .freqDecay = 0.2f,
             .freqSustain = 0.7f,
-            .freqRelease = 5.3f,
-            .lfoFreq = i *1.0f + 1.0f, // 5 Hz LFO
+            .freqRelease = 0.3f,
+            .lfoFreq = 1.0f, // 5 Hz LFO
             .lfoAmpDepth = 0.1f, // 10% amplitude modulation
             .lfoFreqDepth = 0.1f, // 10% frequency modulation
             .lfoPhase = 0.0f,
-            .waveformType = i == 0 ? WAVEFORM_SAMPLE : WAVEFORM_SQUARE, // First oscillator uses the sample
+            .waveformType = t,
             .lfoType = WAVEFORM_SINE,
             .noteOn = 1,
             .noteOff = 0,
             .time = 0.0f,
             .releaseStartTime = 0.0f,
             .sampleData = sampleData,
-            .sampleFrames = sampleFrames
+            .sampleFrames = sampleFrames,
+            .sampleOriginalSampleRate = sampleRate, // Store the original sample rate of the sample
         };
+        if (i == 0) {
+          float a = 1;
+          if (argc > 1) {
+            a = atof(argv[1]);
+            oscSystem.oscillators[i].sampleOriginalSampleRate = a;
+          }
+          oscSystem.oscillators[i].lfoFreq = 0;
+        }
     }
 
     deviceConfig = ma_device_config_init(ma_device_type_playback);
     deviceConfig.playback.format   = ma_format_f32;
     deviceConfig.playback.channels = 2;
-    deviceConfig.sampleRate        = SAMPLE;
+    deviceConfig.sampleRate        = SR;
     deviceConfig.dataCallback      = data_callback;
     deviceConfig.pUserData         = &oscSystem;
 
@@ -246,12 +264,6 @@ int main() {
     }
 
     printf("Press Enter to quit...\n");
-    getchar();
-
-    for (int i = 0; i < oscSystem.numOscillators; ++i) {
-        oscSystem.oscillators[i].noteOff = 1;
-        oscSystem.oscillators[i].noteOn = 0;
-    }
     getchar();
 
     ma_device_uninit(&device);
