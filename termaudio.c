@@ -27,15 +27,24 @@ STRING_EXT 107
 for
 
 {"get-outs", []}
-
--> 131 104 002 109 000 000 000 008 103 101 116 045 111 117 116 115 106
-   ETF STU LEN BIN L3  L2  L1  L0  g   e   t   -   o   u   t   s   NIL
+131 104 002 109 000 000 000 008 103 101 116 045 111 117 116 115 106
+ETF STU LEN BIN L3  L2  L1  L0  g   e   t   -   o   u   t   s   NIL
 
 {"ret-outs", [0, 1, 2]}
+131 104 002 109 000 000 000 008 114 101 116 045 111 117 116 115 107 000 003 000 001 002
+ETF STU LEN BIN L3  L2  L1  L0  r   e   t   -   o   u   t   s   STE L1  L0  1   2   3
 
--> 131 104 002 109 000 000 000 008 114 101 116 045 111 117 116 115 107 000 003 000 001 002
-   ETF STU LEN BIN L3  L2  L1  L0  r   e   t   -   o   u   t   s   STE L1  L0  1   2   3
+{"get-outs", [1023]}
+131 104 002 109 000 000 000 008 103 101 116 045 111 117 116 115 108 000 000 000 001 098 000 000 003 255 106
+ETF STU LEN BIN L3  L2  L1  L0  r   e   t   -   o   u   t   s   LIE L3  L2  L1  L0  INE 1023            NIL
 
+{"get-outs",[1, 1023]}
+131 104 002 109 000 000 000 008 103 101 116 045 111 117 116 115 108 000 000 000 002 097 001 098 000 000 003 255 106
+ETF STU LEN BIN L3  L2  L1  L0  r   e   t   -   o   u   t   s   LIE L3  L2  L1  L0  SIE 1   INE 1023            NIL
+
+{"info","okay"}
+131 104 002 109 000 000 000 004 105 110 102 111 109 000 000 000 004 111 107 097 121
+ETF STU LEN BIN L3  L2  L1  L0  i   n   f   o   BIN L3  L2  L1  L0  o   k   a   y
 */
 
 int32_t read_int32(const uint8_t *buffer) {

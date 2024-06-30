@@ -60,6 +60,9 @@ fifteen: fifteen.c
 sixteen: sixteen.c
 	cc -g $(INC) sixteen.c -o sixteen $(LIB)
 
+crex1: crex1.c
+	cc -g $(INC) crex1.c -o crex1 $(LIB)
+
 clean:
 	rm -f test1
 	rm -f simple_playback_sine
