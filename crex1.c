@@ -7,29 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "coroutine.h"
-
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
-
-int ascending(void) {
-  static int i;
-  scrBegin;
-  for (i=0; i<10; i++) {
-    scrReturn(i);
-  }
-  scrFinish(-1);
-}
-
-int descending(ccrContParam, int fd) {
-  ccrBeginContext;
-  int i;
-  ccrEndContext(foo);
-  ccrBegin(foo);
-  for (foo->i=10; foo->i>=0; foo->i--) {
-    ccrReturn(foo->i);
-  }
-  ccrFinish(-1);
-}
 
 #define ETF_MAGIC         (131)
 #define SMALL_INTEGER_EXT (97)
@@ -366,19 +344,6 @@ void cleaner(void) {
 int main(int argc, char *argv[]) {
   atexit(cleaner);
 
-#if 0
-  do {
-    i = ascending();
-    LOG("got %d"CR, i);
-  } while (i != -1);
-  ccrContext z = 0;
-
-  do {
-    i = descending(&z, -1);
-    LOG("got %d"CR, i);
-  } while (z);
-#endif
-
   struct exa_tuple tuple;
 
   tuple.blob = NULL;
@@ -391,13 +356,39 @@ int main(int argc, char *argv[]) {
 
   pid_t parent = getppid();
 
+  // if elixir dies, our parent changes... so quit
+  // if elixir closes us, reads from stdin return 0... so quit
+
   while (1) {
     if (parent != getppid()) {
       LOG("parent changed!"CR);
       break;
     }
     if (exa_parse(fd, &tuple) == read_okay) {
-      exa_dump(&tuple);
+      if (strcmp(tuple.key, "get-ins") == 0) {
+        LOG("get-ins"CR);
+        // should return {"ins",[0,1,2]}
+      } else if (strcmp(tuple.key, "get-outs") == 0) {
+        LOG("get-outs"CR);
+        // should return {"outs", [0,1,2]}
+      } else if (strcmp(tuple.key, "set-in") == 0) {
+        LOG("set-in"CR);
+      } else if (strcmp(tuple.key, "set-out") == 0) {
+        LOG("set-out"CR);
+      } else if (strcmp(tuple.key, "status") == 0) {
+        LOG("status"CR);
+        // more command ideas
+        // 44100 16bit signed 1 channel
+        // store-0 [] - stores inside exaudio
+        // play-0 one-shot
+        // loop-0 forever
+        // stop-0
+        // record-0 frames - gets # of frames to buffer inside exaudio
+        // get-0 -> sends exaudio frames to elixir
+        // 8 slots : 0-7
+      } else {
+        exa_dump(&tuple);
+      }
     } else if (read_real_error() <= 0) {
       LOG("read error <%s>"CR, strerror(errno));
       break;
