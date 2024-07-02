@@ -341,6 +341,8 @@ void cleaner(void) {
   fflush(stderr);
 }
 
+// -----------------------------------------------------------
+
 // MA stuff
 
 #define MA_NO_FLAC
@@ -355,16 +357,6 @@ void cleaner(void) {
 
 #define SAMPLERATE (44100)
 #define CHANNELS (2)
-
-//
-
-ma_bool32 device_cb(ma_context* pContext,
-  ma_device_type deviceType,
-  const ma_device_info* pInfo,
-  void* pUserData) {
-    LOG("%s"CR, pInfo->name);
-    return MA_TRUE;
-}
 
 // basic attempt to get a 12-bit value from a device name
 // to use as a semi-predictable ID that is eventually
@@ -393,127 +385,176 @@ uint16_t hash12(char *s) {
 #define DNSZ (80)
 
 struct {
+  ma_context *ctx;
   int id;
-  char inuse;
+  ma_device_id *maid;
+  char slot_in_use;
   char available;
   uint16_t hash;
   char name[DNSZ];
   char isDefault;
-} dev_connect[DCNT];
+} dev_list[DCNT];
 
 void devinfo(void) {
   for (int i=0; i<DCNT; i++) {
-    if (dev_connect[i].inuse) {
+    if (dev_list[i].slot_in_use) {
       char *type = "INPUT";
-      if (dev_connect[i].hash & out_hash_upper) type = "OUTPUT";
+      if (dev_list[i].hash & out_hash_upper) type = "OUTPUT";
       char *available = "UNAVAILABLE";
-      if (dev_connect[i].available) available = "AVAILABLE";
+      if (dev_list[i].available) available = "AVAILABLE";
       char *isdefault = "";
-      if (dev_connect[i].isDefault) isdefault = "DEFAULT";
-      LOG("%d,<<%s>> %s %s %s [%d] (%d)"CR,
-        dev_connect[i].hash,
-        dev_connect[i].name,
+      if (dev_list[i].isDefault) isdefault = "DEFAULT";
+      LOG("%d,<<%s>> %s %s %s [%d] (%d/%p)"CR,
+        dev_list[i].hash,
+        dev_list[i].name,
         type,
         available,
         isdefault,
         i,
-        dev_connect[i].id
+        dev_list[i].id,
+        dev_list[i].maid
       );
     }
   }  
 }
 
-int find_device(u_int16_t hash) {
-  for (int i=0; i<DCNT; i++) if (dev_connect[i].hash == hash) return i;
+int find_device_hash(u_int16_t hash) {
+  for (int i=0; i<DCNT; i++) if (dev_list[i].hash == hash) return i;
   return -1;
 }
 
-int unused_device(void) {
-  for (int i=0; i<DCNT; i++) if (dev_connect[i].inuse == 0) return i;
+int find_free_device_slot(void) {
+  for (int i=0; i<DCNT; i++) if (dev_list[i].slot_in_use == 0) return i;
   return -1;
 }
+
+ma_device_info *out_info;
+ma_uint32 out_count;
+ma_device_info *in_info;
+ma_uint32 in_count;
+
+#define DEV_INFO_OUT (0)
+#define DEV_INFO_IN (1)
+#define DEV_INFO_COUNT (2)
+
+struct {
+  ma_device_info *info;
+  ma_uint32 count;
+  uint16_t hash_upper;
+} dev_info[DEV_INFO_COUNT];
 
 void scan_devices(void) {
   static char first = 1;
+  if (first) {
+    for (int i=0; i<DCNT; i++) {
+      dev_list[i].ctx = NULL;
+      dev_list[i].slot_in_use = 0;
+      dev_list[i].available = 0;
+      dev_list[i].hash = 0;
+      dev_list[i].isDefault = 0;
+      dev_list[i].name[0] = '\0';
+      dev_list[i].id = -1;
+      dev_list[i].maid = NULL;
+    }
+
+    dev_info[DEV_INFO_OUT].hash_upper = out_hash_upper;
+    dev_info[DEV_INFO_IN].hash_upper = in_hash_upper;
+
+    first = 0;
+  }
+
   ma_context ctx;
+  
   LOG("=> scan_devices"CR);
   LOG("miniaudio version %s"CR, ma_version_string());
+
   LOG("=> ma_context_init"CR);
   if (ma_context_init(NULL, 0, NULL, &ctx) != MA_SUCCESS) {
     LOG("failed to get ma_context"CR);
     return;
   }
 
-  ma_device_info* out_info;
-  ma_uint32 out_count;
-  ma_device_info* in_info;
-  ma_uint32 in_count;
-
-  if (first) {
-    for (int i=0; i<DCNT; i++) {
-      dev_connect[i].inuse = 0;
-      dev_connect[i].available = 0;
-      dev_connect[i].hash = 0;
-      dev_connect[i].isDefault = 0;
-      dev_connect[i].name[0] = '\0';
-      dev_connect[i].id = -1;
-    }
-    first = 0;
-  }
-
-  if (ma_context_get_devices(&ctx, &out_info, &out_count, &in_info, &in_count) != MA_SUCCESS) {
+  if (ma_context_get_devices(&ctx,
+    &dev_info[DEV_INFO_OUT].info, &dev_info[DEV_INFO_OUT].count,
+    &dev_info[DEV_INFO_IN].info, &dev_info[DEV_INFO_IN].count) != MA_SUCCESS) {
     LOG("failed to get I/O device list"CR);
     goto clean;
   }
 
   for (int i=0; i<DCNT; i++) {
-    dev_connect[i].available = 0;
-    dev_connect[i].isDefault = 0;
-    dev_connect[i].id = -1;
+    dev_list[i].available = 0;
+    dev_list[i].isDefault = 0;
+    dev_list[i].id = -1;
+    dev_list[i].maid = NULL;
   }
 
-  for (int i=0; i<out_count; i++) {
-    char *name = out_info[i].name;
-    uint16_t hash = hash12(name) | out_hash_upper;
-    int n = find_device(hash);
-    if (n < 0) {
-      n = unused_device();
+  for (int which = 0; which < DEV_INFO_COUNT; which++) {
+    uint16_t hash_upper = dev_info[which].hash_upper;
+    int count = dev_info[which].count;
+    for (int i=0; i<count; i++) {
+      ma_device_info *info = &dev_info[which].info[i];
+      char *name = info->name;
+      uint16_t hash = hash12(name) | hash_upper;
+      int n = find_device_hash(hash);
       if (n < 0) {
-        LOG("no space for %d <<%s>>"CR, hash, name);
-        continue;
+        n = find_free_device_slot();
+        if (n < 0) {
+          LOG("no space for %d <<%s>>"CR, hash, name);
+          continue;
+        }
       }
+      dev_list[n].slot_in_use = 1;
+      dev_list[n].id = i;
+      dev_list[n].maid = &info->id;
+      dev_list[n].available = 1;
+      dev_list[n].hash = hash;
+      dev_list[n].isDefault = info->isDefault;
+      strcpy(dev_list[n].name, name);
     }
-    dev_connect[n].inuse = 1;
-    dev_connect[n].id = i;
-    dev_connect[n].available = 1;
-    dev_connect[n].hash = hash;
-    strcpy(dev_connect[n].name, name);
-    dev_connect[n].isDefault = out_info[i].isDefault;
   }
 
-  for (int i=0; i<in_count; i++) {
-    char *name = in_info[i].name;
-    uint16_t hash = hash12(name) | in_hash_upper;
-    int n = find_device(hash);
-    if (n < 0) {
-      n = unused_device();
-      if (n < 0) {
-        LOG("no space for %d <<%s>>"CR, hash, name);
-        continue;
-      }
-    }
-    dev_connect[n].inuse = 1;
-    dev_connect[n].id = i;
-    dev_connect[n].available = 1;
-    dev_connect[n].hash = hash;
-    strcpy(dev_connect[n].name, name);
-    dev_connect[n].isDefault = in_info[i].isDefault;
-  }
   devinfo();
   clean:
   LOG("=> ma_context_init"CR);
   ma_context_uninit(&ctx);
 }
+
+//
+
+void data_cb(ma_device *pDevice, void *pOutput, const void *pInput, ma_uint32 frame_count) {
+  if (pDevice) {
+    if (pOutput) {
+    }
+    if (pInput) {
+    }
+  }
+}
+
+//
+
+void notification_cb(const ma_device_notification *pNotification) {
+  if (pNotification) {
+    switch (pNotification->type) {
+      case ma_device_notification_type_started:
+        break;
+      case ma_device_notification_type_stopped:
+        break;
+      case ma_device_notification_type_rerouted:
+        break;
+      case ma_device_notification_type_interruption_began:
+        break;
+      case ma_device_notification_type_interruption_ended:
+        break;
+      case ma_device_notification_type_unlocked:
+        break;
+      default:
+        break;
+    }
+  } else {
+  }
+}
+
+//
 
 int main(int argc, char *argv[]) {
   atexit(cleaner);
