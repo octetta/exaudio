@@ -478,6 +478,7 @@ void scan_devices(void) {
       if (!s) {
         s = malloc(sizeof *s);
         s->id = h12;
+        LOG("create %d"CR, h12);
         strcpy(s->name, name);
         HASH_ADD_INT(devices, id, s);
       }
@@ -589,6 +590,13 @@ int main(int argc, char *argv[]) {
 
   if (tuple.blob) free(tuple.blob);
   if (tuple.list) free(tuple.list);
+
+  struct s_device *cur, *tmp;
+  HASH_ITER(hh, devices, cur, tmp) {
+    LOG("remove %d"CR, cur->id);
+    HASH_DEL(devices, cur);
+    free(cur);
+  }
 
   return 0;
 }
