@@ -364,8 +364,8 @@ void cleaner(void) {
 // the device scan
 
 #define H12SEED (0x0c1)
-uint16_t hash12(char *s) {
-  uint16_t acc = H12SEED;
+int hash12(char *s) {
+  int acc = H12SEED;
   if (!s) return 0;
   uint8_t *b = s;
   uint8_t n = 0;
@@ -384,48 +384,38 @@ uint16_t hash12(char *s) {
 #define DCNT (100)
 #define DNSZ (80)
 
-struct {
+#include "uthash.h"
+
+struct dev_list_s {
   ma_context *ctx;
+  ma_device_id *devid;
+  int devindex;
+  char attached;
   int id;
-  ma_device_id *maid;
-  char slot_in_use;
-  char available;
-  uint16_t hash;
   char name[DNSZ];
   char isDefault;
-} dev_list[DCNT];
+  UT_hash_handle hh;
+} *dev_list = NULL;
 
 void devinfo(void) {
-  for (int i=0; i<DCNT; i++) {
-    if (dev_list[i].slot_in_use) {
-      char *type = "INPUT";
-      if (dev_list[i].hash & out_hash_upper) type = "OUTPUT";
-      char *available = "UNAVAILABLE";
-      if (dev_list[i].available) available = "AVAILABLE";
-      char *isdefault = "";
-      if (dev_list[i].isDefault) isdefault = "DEFAULT";
-      LOG("%d,<<%s>> %s %s %s [%d] (%d/%p)"CR,
-        dev_list[i].hash,
-        dev_list[i].name,
-        type,
-        available,
-        isdefault,
-        i,
-        dev_list[i].id,
-        dev_list[i].maid
-      );
-    }
-  }  
+  struct dev_list_s *s;
+  for (s = dev_list; s != NULL; s = s->hh.next) {
+    char *type = "INPUT";
+    if (s->id & out_hash_upper) type = "OUTPUT";
+    char *attached = "DETACHED";
+    if (s->attached) attached = "ATTACHED";
+    char *isdefault = "";
+    if (s->isDefault) isdefault = "DEFAULT";
+    LOG("%d,<<%s>> %s %s %s (%p)"CR,
+      s->id, s->name,
+      type, attached, isdefault, s->devid);
+  }
 }
 
-int find_device_hash(u_int16_t hash) {
-  for (int i=0; i<DCNT; i++) if (dev_list[i].hash == hash) return i;
-  return -1;
-}
-
-int find_free_device_slot(void) {
-  for (int i=0; i<DCNT; i++) if (dev_list[i].slot_in_use == 0) return i;
-  return -1;
+struct dev_list_s *find_device(int id) {
+  struct dev_list_s *s;
+  HASH_FIND_INT(dev_list, &id, s);
+  return s;
 }
 
 ma_device_info *out_info;
@@ -440,26 +430,14 @@ ma_uint32 in_count;
 struct {
   ma_device_info *info;
   ma_uint32 count;
-  uint16_t hash_upper;
+  int hash_upper;
 } dev_info[DEV_INFO_COUNT];
 
 void scan_devices(void) {
   static char first = 1;
   if (first) {
-    for (int i=0; i<DCNT; i++) {
-      dev_list[i].ctx = NULL;
-      dev_list[i].slot_in_use = 0;
-      dev_list[i].available = 0;
-      dev_list[i].hash = 0;
-      dev_list[i].isDefault = 0;
-      dev_list[i].name[0] = '\0';
-      dev_list[i].id = -1;
-      dev_list[i].maid = NULL;
-    }
-
     dev_info[DEV_INFO_OUT].hash_upper = out_hash_upper;
     dev_info[DEV_INFO_IN].hash_upper = in_hash_upper;
-
     first = 0;
   }
 
@@ -481,35 +459,31 @@ void scan_devices(void) {
     goto clean;
   }
 
-  for (int i=0; i<DCNT; i++) {
-    dev_list[i].available = 0;
-    dev_list[i].isDefault = 0;
-    dev_list[i].id = -1;
-    dev_list[i].maid = NULL;
+  // temporarily clear attached field for all devices
+  // so we can change the state while itereating
+  // devices
+  struct dev_list_s *s;
+  for (s = dev_list; s != NULL; s = s->hh.next) {
+    s->attached = 0;
   }
-
+  // scan and update, adding as necessary
   for (int which = 0; which < DEV_INFO_COUNT; which++) {
-    uint16_t hash_upper = dev_info[which].hash_upper;
+    int hash_upper = dev_info[which].hash_upper;
     int count = dev_info[which].count;
     for (int i=0; i<count; i++) {
       ma_device_info *info = &dev_info[which].info[i];
       char *name = info->name;
-      uint16_t hash = hash12(name) | hash_upper;
-      int n = find_device_hash(hash);
-      if (n < 0) {
-        n = find_free_device_slot();
-        if (n < 0) {
-          LOG("no space for %d <<%s>>"CR, hash, name);
-          continue;
-        }
+      int h12 = hash12(name) | hash_upper;
+      struct dev_list_s *s = find_device(h12);
+      if (!s) {
+        s = malloc(sizeof *s);
+        s->id = h12;
+        strcpy(s->name, name);
+        HASH_ADD_INT(dev_list, id, s);
       }
-      dev_list[n].slot_in_use = 1;
-      dev_list[n].id = i;
-      dev_list[n].maid = &info->id;
-      dev_list[n].available = 1;
-      dev_list[n].hash = hash;
-      dev_list[n].isDefault = info->isDefault;
-      strcpy(dev_list[n].name, name);
+      s->devid = &info->id;
+      s->attached = 1;
+      s->isDefault = info->isDefault;
     }
   }
 
