@@ -386,7 +386,7 @@ int hash12(char *s) {
 
 #include "uthash.h"
 
-struct dev_list_s {
+struct s_device {
   ma_context *ctx;
   ma_device_id *devid;
   int devindex;
@@ -395,11 +395,11 @@ struct dev_list_s {
   char name[DNSZ];
   char isDefault;
   UT_hash_handle hh;
-} *dev_list = NULL;
+} *devices = NULL;
 
 void devinfo(void) {
-  struct dev_list_s *s;
-  for (s = dev_list; s != NULL; s = s->hh.next) {
+  struct s_device *s;
+  for (s = devices; s != NULL; s = s->hh.next) {
     char *type = "INPUT";
     if (s->id & out_hash_upper) type = "OUTPUT";
     char *attached = "DETACHED";
@@ -412,9 +412,9 @@ void devinfo(void) {
   }
 }
 
-struct dev_list_s *find_device(int id) {
-  struct dev_list_s *s;
-  HASH_FIND_INT(dev_list, &id, s);
+struct s_device *find_device(int id) {
+  struct s_device *s;
+  HASH_FIND_INT(devices, &id, s);
   return s;
 }
 
@@ -431,13 +431,13 @@ struct {
   ma_device_info *info;
   ma_uint32 count;
   int hash_upper;
-} dev_info[DEV_INFO_COUNT];
+} top[DEV_INFO_COUNT];
 
 void scan_devices(void) {
   static char first = 1;
   if (first) {
-    dev_info[DEV_INFO_OUT].hash_upper = out_hash_upper;
-    dev_info[DEV_INFO_IN].hash_upper = in_hash_upper;
+    top[DEV_INFO_OUT].hash_upper = out_hash_upper;
+    top[DEV_INFO_IN].hash_upper = in_hash_upper;
     first = 0;
   }
 
@@ -453,8 +453,8 @@ void scan_devices(void) {
   }
 
   if (ma_context_get_devices(&ctx,
-    &dev_info[DEV_INFO_OUT].info, &dev_info[DEV_INFO_OUT].count,
-    &dev_info[DEV_INFO_IN].info, &dev_info[DEV_INFO_IN].count) != MA_SUCCESS) {
+    &top[DEV_INFO_OUT].info, &top[DEV_INFO_OUT].count,
+    &top[DEV_INFO_IN].info, &top[DEV_INFO_IN].count) != MA_SUCCESS) {
     LOG("failed to get I/O device list"CR);
     goto clean;
   }
@@ -462,24 +462,24 @@ void scan_devices(void) {
   // temporarily clear attached field for all devices
   // so we can change the state while itereating
   // devices
-  struct dev_list_s *s;
-  for (s = dev_list; s != NULL; s = s->hh.next) {
+  struct s_device *s;
+  for (s = devices; s != NULL; s = s->hh.next) {
     s->attached = 0;
   }
   // scan and update, adding as necessary
   for (int which = 0; which < DEV_INFO_COUNT; which++) {
-    int hash_upper = dev_info[which].hash_upper;
-    int count = dev_info[which].count;
+    int hash_upper = top[which].hash_upper;
+    int count = top[which].count;
     for (int i=0; i<count; i++) {
-      ma_device_info *info = &dev_info[which].info[i];
+      ma_device_info *info = &top[which].info[i];
       char *name = info->name;
       int h12 = hash12(name) | hash_upper;
-      struct dev_list_s *s = find_device(h12);
+      struct s_device *s = find_device(h12);
       if (!s) {
         s = malloc(sizeof *s);
         s->id = h12;
         strcpy(s->name, name);
-        HASH_ADD_INT(dev_list, id, s);
+        HASH_ADD_INT(devices, id, s);
       }
       s->devid = &info->id;
       s->attached = 1;
