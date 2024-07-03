@@ -386,11 +386,23 @@ int hash12(char *s) {
 
 #include "uthash.h"
 
-struct s_device {
+static int ctx_count = 0;
+
+struct s_context {
+  int id;
+  int visited;
   ma_context *ctx;
+  void (*data_cb)(ma_device*, void*, const void*, ma_uint32);
+  void (*notify_cb)(const ma_device_notification*);
+  UT_hash_handle hh;
+} *contexts = NULL;
+
+struct s_device {
+  int ctxid;
   ma_device_id *devid;
   int devindex;
   char attached;
+  char visited;
   int id;
   char name[DNSZ];
   char isDefault;
@@ -406,9 +418,9 @@ void devinfo(void) {
     if (s->attached) attached = "ATTACHED";
     char *isdefault = "";
     if (s->isDefault) isdefault = "DEFAULT";
-    LOG("%d,<<%s>> %s %s %s (%p)"CR,
+    LOG("%d,<<%s>> %s %s %s [%d]"CR,
       s->id, s->name,
-      type, attached, isdefault, s->devid);
+      type, attached, isdefault, s->ctxid);
   }
 }
 
@@ -441,30 +453,30 @@ void scan_devices(void) {
     first = 0;
   }
 
-  ma_context ctx;
+  ma_context *ctx = (ma_context *)malloc(sizeof(ma_context));
   
   LOG("=> scan_devices"CR);
   LOG("miniaudio version %s"CR, ma_version_string());
 
   LOG("=> ma_context_init"CR);
-  if (ma_context_init(NULL, 0, NULL, &ctx) != MA_SUCCESS) {
+  if (ma_context_init(NULL, 0, NULL, ctx) != MA_SUCCESS) {
     LOG("failed to get ma_context"CR);
     return;
   }
 
-  if (ma_context_get_devices(&ctx,
+  if (ma_context_get_devices(ctx,
     &top[DEV_INFO_OUT].info, &top[DEV_INFO_OUT].count,
     &top[DEV_INFO_IN].info, &top[DEV_INFO_IN].count) != MA_SUCCESS) {
     LOG("failed to get I/O device list"CR);
     goto clean;
   }
 
-  // temporarily clear attached field for all devices
-  // so we can change the state while itereating
-  // devices
+  int new_or_reattached_devices = 0;
+
+  // clear visited flag so we can detect if a device was removed
   struct s_device *s;
   for (s = devices; s != NULL; s = s->hh.next) {
-    s->attached = 0;
+    s->visited = 0;
   }
   // scan and update, adding as necessary
   for (int which = 0; which < DEV_INFO_COUNT; which++) {
@@ -478,20 +490,49 @@ void scan_devices(void) {
       if (!s) {
         s = malloc(sizeof *s);
         s->id = h12;
+        s->ctxid = ctx_count;
         LOG("create %d"CR, h12);
         strcpy(s->name, name);
+        new_or_reattached_devices++;
         HASH_ADD_INT(devices, id, s);
+      } else if (!s->attached) {
+        LOG("reattach %d"CR, h12);
+        s->ctxid = ctx_count;
+        new_or_reattached_devices++;
       }
+      s->visited = 1;
       s->devid = &info->id;
       s->attached = 1;
       s->isDefault = info->isDefault;
+    }
+    // clear visited flag we can tell if a device was removed
+    for (s = devices; s != NULL; s = s->hh.next) {
+      if ((s->id & hash_upper) && !s->visited) {
+        LOG("not visited %d"CR, s->id);
+        s->attached = 0;
+        s->ctxid = -1;
+      }
     }
   }
 
   devinfo();
   clean:
-  LOG("=> ma_context_init"CR);
-  ma_context_uninit(&ctx);
+
+  if (new_or_reattached_devices) {
+    // create new entry in context table
+    struct s_context *c = NULL;
+    c = malloc(sizeof *c);
+    c->id = ctx_count;
+    c->ctx = ctx;
+    c->data_cb = NULL;
+    c->notify_cb = NULL;
+    int id = ctx_count;
+    HASH_ADD_INT(contexts, id, c);
+    ctx_count++;
+  } else {
+    LOG("=> ma_context_uninit"CR);
+    ma_context_uninit(ctx);
+  }
 }
 
 //
@@ -591,11 +632,18 @@ int main(int argc, char *argv[]) {
   if (tuple.blob) free(tuple.blob);
   if (tuple.list) free(tuple.list);
 
-  struct s_device *cur, *tmp;
-  HASH_ITER(hh, devices, cur, tmp) {
-    LOG("remove %d"CR, cur->id);
-    HASH_DEL(devices, cur);
-    free(cur);
+  struct s_device *cur_dev, *tmp_dev;
+    HASH_ITER(hh, devices, cur_dev, tmp_dev) {
+    LOG("remove device %d"CR, cur_dev->id);
+    HASH_DEL(devices, cur_dev);
+    free(cur_dev);
+  }
+
+  struct s_context *cur_ctx, *tmp_ctx;
+    HASH_ITER(hh, contexts, cur_ctx, tmp_ctx) {
+    LOG("remove context %d"CR, cur_ctx->id);
+    HASH_DEL(contexts, cur_ctx);
+    free(cur_ctx);
   }
 
   return 0;
