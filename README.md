@@ -11,5 +11,8 @@ https://github.com/tidalcycles/Dirt-Samples/blob/master/808/TR808.TXT
 ```elixir
 port = Port.open({:spawn, "./exaudio"}, [:binary])
 Port.command(port, :erlang.term_to_binary({"scan"}))
+r = receive do msg -> msg end
+{_, {:data, s}} = r
+:erlang.binary_to_term s
 Port.close()
 ```

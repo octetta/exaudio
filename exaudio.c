@@ -617,6 +617,12 @@ void notification_cb(const ma_device_notification *pNotification) {
 
 //
 
+int writeb1(int fd, uint8_t c) {
+  return write(fd, &c, sizeof(uint8_t));
+}
+
+//
+
 int main(int argc, char *argv[]) {
   atexit(cleaner);
 
@@ -644,6 +650,16 @@ int main(int argc, char *argv[]) {
       if (strcmp(tuple.key, "scan") == 0) {
         LOG("scan"CR);
         scan_devices();
+        writeb1(STDOUT_FILENO, 131);
+        writeb1(STDOUT_FILENO, 104);
+        writeb1(STDOUT_FILENO, 0);
+        /* should return something like
+           [
+            {"name0", id0, [:capability_atoms]},
+            {"name1", id1, [:capability_atoms]},
+            ...
+           ]
+        */
         // init_devices();
         // list_devices();
         // uninit_devices();
