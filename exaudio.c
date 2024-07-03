@@ -7,7 +7,18 @@
 #include <string.h>
 #include <unistd.h>
 
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#define EXA_LOG_ALL (0)
+#define EXA_LOG_FATAL (1)
+#define EXA_LOG_ERROR (2)
+#define EXA_LOG_DEBUG (2)
+#define EXA_LOG_INFO (4)
+
+static int _exa_log_level = 0;
+
+// it's only on or off for now... the defines above signal intent though...
+#define LOG(...) if (_exa_log_level) fprintf(stderr, __VA_ARGS__)
+
+// Erlang terms we may parse or emit
 
 #define ETF_MAGIC         (131)
 #define SMALL_INTEGER_EXT (97)
@@ -17,6 +28,36 @@
 #define STRING_EXT        (107) // followed by two bytes of length (big-endian)
 #define LIST_EXT          (108) // followed by four bytes of length
 #define BINARY_EXT        (109) // followed by four bytes of length
+
+#define ZLIB_EXT          (80)  // followed by four bytes of uncompressed length and a zlib stream...
+
+/*
+
+# ----
+
+iex(2)> :erlang.term_to_binary([1,2,3], [:compressed])
+<<131, 107, 0, 3, 1, 2, 3>>
+
+iex(3)> a = :erlang.term_to_binary([1,2,3,5,6,7,8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],[:compressed])
+<<131, 80, 0, 0, 0, 27, 120, 156, 203, 102, 144, 96, 100, 98, 102, 101, 99, 231,
+  224, 100, 64, 3, 0, 16, 211, 0, 173>>
+
+iex(6)> b = :erlang.binary_to_term a
+[1, 2, 3, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+iex(7)> length b
+24
+
+iex(9)> z = :erlang.binary_to_list a
+[131, 80, 0, 0, 0, 27, 120, 156, 203, 102, 144, 96, 100, 98, 102, 101, 99, 231,
+224, 100, 64, 3, 0, 16, 211, 0, 173]
+
+iex(10)> length z
+27
+
+# -----
+*/
+
 
 #define KEY_STORE (33)
 #define KEY_MAX (KEY_STORE-1)
@@ -627,6 +668,10 @@ int main(int argc, char *argv[]) {
         // record-0 frames - gets # of frames to buffer inside exaudio
         // get-0 -> sends exaudio frames to elixir
         // 8 slots : 0-7
+      } else if (strcmp(tuple.key, "log-on") == 0) {
+        _exa_log_level = 1;
+      } else if (strcmp(tuple.key, "log-off") == 0) {
+        _exa_log_level = 0;
       } else {
         exa_dump(&tuple);
       }
