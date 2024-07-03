@@ -1,0 +1,9 @@
+{
+    "makefile.launchConfigurations": [
+        {
+            "cwd": "/home/stewartj/exaudio",
+            "binaryPath": "/home/stewartj/exaudio/exaudio",
+            "binaryArgs": []
+        }
+    ]
+}

@@ -4,7 +4,9 @@ ifeq ($(shell uname -s), Darwin)
 LIB += -framework AudioUnit -framework CoreAudio -framework CoreFoundation
 endif
 
-all: test1 exaudio
+all: exaudio
+
+exp: test1
 
 test1: test1.c
 	cc -g $(INC) test1.c -o test1 $(LIB)

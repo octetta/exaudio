@@ -16,3 +16,11 @@ r = receive do msg -> msg end
 :erlang.binary_to_term s
 Port.close()
 ```
+
+```elixir
+port = Port.open({:spawn, "./exaudio"}, [:binary])
+Port.command(port, :erlang.term_to_binary({"log-on"}))
+Port.command(port, :erlang.term_to_binary({"scan"}))
+{_, {:data, s}} = receive do msg -> msg end
+:erlang.binary_to_term s
+```

@@ -1,11 +1,26 @@
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#define FD_PRINTF_MAX (1024)
+
+static char _fd_printf_buf[FD_PRINTF_MAX];
+
+int fd_printf(int fd, const char * fmt, ...) {
+  int n;
+  va_list ap;
+  va_start (ap, fmt);
+  n = vsnprintf (_fd_printf_buf, FD_PRINTF_MAX, fmt, ap);
+  va_end (ap);
+  write (fd, _fd_printf_buf, n);
+  return n;
+}
 
 #define EXA_LOG_ALL (0)
 #define EXA_LOG_FATAL (1)
@@ -16,7 +31,7 @@
 static int _exa_log_level = 0;
 
 // it's only on or off for now... the defines above signal intent though...
-#define LOG(...) if (_exa_log_level) fprintf(stderr, __VA_ARGS__)
+#define LOG(...) if (_exa_log_level) fd_printf(STDERR_FILENO, __VA_ARGS__)
 
 // Erlang terms we may parse or emit
 
@@ -378,8 +393,6 @@ int exa_parse(int fd, struct exa_tuple *tuple) {
 
 void cleaner(void) {
   LOG("cleaner()"CR);
-  fflush(stdout);
-  fflush(stderr);
 }
 
 // -----------------------------------------------------------
@@ -621,6 +634,11 @@ int writeb1(int fd, uint8_t c) {
   return write(fd, &c, sizeof(uint8_t));
 }
 
+int writeb4(int fd, uint32_t w) {
+  uint32_t n = htobe32(w);
+  return write(fd, &n, sizeof(uint32_t));
+}
+
 //
 
 int main(int argc, char *argv[]) {
@@ -634,7 +652,8 @@ int main(int argc, char *argv[]) {
   tuple.len = 0;
   tuple.count = 0;
 
-  int fd = STDIN_FILENO;
+  int fdin = STDIN_FILENO;
+  int fdout = STDOUT_FILENO;
 
   pid_t parent = getppid();
 
@@ -646,13 +665,18 @@ int main(int argc, char *argv[]) {
       LOG("parent changed!"CR);
       break;
     }
-    if (exa_parse(fd, &tuple) == read_okay) {
+    if (exa_parse(fdin, &tuple) == read_okay) {
       if (strcmp(tuple.key, "scan") == 0) {
         LOG("scan"CR);
         scan_devices();
-        writeb1(STDOUT_FILENO, 131);
-        writeb1(STDOUT_FILENO, 104);
-        writeb1(STDOUT_FILENO, 0);
+        writeb1(fdout, ETF_MAGIC);
+        writeb1(fdout, SMALL_TUPLE_EXT);
+        // writeb1(fdout, 0); // small tuple length ... 0 means empty
+        writeb1(fdout, 1); // small tuple length
+        writeb1(fdout, BINARY_EXT);
+        char *res = "okay";
+        writeb4(fdout, strlen(res));
+        write(fdout, res, strlen(res));
         /* should return something like
            [
             {"name0", id0, [:capability_atoms]},
