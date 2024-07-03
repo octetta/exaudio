@@ -359,9 +359,8 @@ void cleaner(void) {
 #define CHANNELS (2)
 
 // basic attempt to get a 12-bit value from a device name
-// to use as a semi-predictable ID that is eventually
-// or-ed with 0x1000 for outputs or 0x2000 for inputs in
-// the device scan
+// to use as a semi-predictable ID that is
+// or-ed with 0x1000 for outputs or 0x2000
 
 #define H12SEED (0x0c1)
 int hash12(char *s) {
@@ -378,11 +377,10 @@ int hash12(char *s) {
   return acc;
 }
 
-#define out_hash_upper 0x1000
-#define in_hash_upper 0x2000
+#define OUTPUT_HASH_MASK (0x1000)
+#define INPUT_HASH_MASK  (0x2000)
 
-#define DCNT (100)
-#define DNSZ (80)
+#define DEVICE_NAME_SIZE (160)
 
 #include "uthash.h"
 
@@ -399,12 +397,13 @@ struct s_context {
 
 struct s_device {
   int ctxid;
+  ma_device *dev;
   ma_device_id *devid;
   int devindex;
   char attached;
   char visited;
   int id;
-  char name[DNSZ];
+  char name[DEVICE_NAME_SIZE];
   char isDefault;
   UT_hash_handle hh;
 } *devices = NULL;
@@ -413,7 +412,7 @@ void devinfo(void) {
   struct s_device *s;
   for (s = devices; s != NULL; s = s->hh.next) {
     char *type = "INPUT";
-    if (s->id & out_hash_upper) type = "OUTPUT";
+    if (s->id & OUTPUT_HASH_MASK) type = "OUTPUT";
     char *attached = "DETACHED";
     if (s->attached) attached = "ATTACHED";
     char *isdefault = "";
@@ -442,14 +441,14 @@ ma_uint32 in_count;
 struct {
   ma_device_info *info;
   ma_uint32 count;
-  int hash_upper;
+  int hash_mask;
 } top[DEV_INFO_COUNT];
 
 void scan_devices(void) {
   static char first = 1;
   if (first) {
-    top[DEV_INFO_OUT].hash_upper = out_hash_upper;
-    top[DEV_INFO_IN].hash_upper = in_hash_upper;
+    top[DEV_INFO_OUT].hash_mask = OUTPUT_HASH_MASK;
+    top[DEV_INFO_IN].hash_mask = INPUT_HASH_MASK;
     first = 0;
   }
 
@@ -480,18 +479,18 @@ void scan_devices(void) {
   }
   // scan and update, adding as necessary
   for (int which = 0; which < DEV_INFO_COUNT; which++) {
-    int hash_upper = top[which].hash_upper;
+    int hash_mask = top[which].hash_mask;
     int count = top[which].count;
     for (int i=0; i<count; i++) {
       ma_device_info *info = &top[which].info[i];
       char *name = info->name;
-      int h12 = hash12(name) | hash_upper;
+      int h12 = hash12(name) | hash_mask;
       struct s_device *s = find_device(h12);
       if (!s) {
         s = malloc(sizeof *s);
         s->id = h12;
         s->ctxid = ctx_count;
-        LOG("create %d"CR, h12);
+        LOG("attach %d"CR, h12);
         strcpy(s->name, name);
         new_or_reattached_devices++;
         HASH_ADD_INT(devices, id, s);
@@ -507,9 +506,14 @@ void scan_devices(void) {
     }
     // clear visited flag we can tell if a device was removed
     for (s = devices; s != NULL; s = s->hh.next) {
-      if ((s->id & hash_upper) && !s->visited) {
-        LOG("not visited %d"CR, s->id);
+      // make sure we match the device type (in vs out)
+      // by masking with the hash_mask for this info[] table
+      if ((s->id & hash_mask) && !s->visited) {
+        LOG("detach %d"CR, s->id);
         s->attached = 0;
+        // this is an opportunity to mark the context table
+        // in some way that it makes it easier to remove
+        // unused context entries
         s->ctxid = -1;
       }
     }
@@ -596,19 +600,24 @@ int main(int argc, char *argv[]) {
       break;
     }
     if (exa_parse(fd, &tuple) == read_okay) {
-      if (strcmp(tuple.key, "scan-devices") == 0) {
-        LOG("scan-devices"CR);
+      if (strcmp(tuple.key, "scan") == 0) {
+        LOG("scan"CR);
         scan_devices();
         // init_devices();
         // list_devices();
         // uninit_devices();
         // should return {"devices",[0,1,2]}
-      } else if (strcmp(tuple.key, "set-in") == 0) {
-        LOG("set-in"CR);
-      } else if (strcmp(tuple.key, "set-out") == 0) {
-        LOG("set-out"CR);
-      } else if (strcmp(tuple.key, "status") == 0) {
-        LOG("status"CR);
+      } else if (strcmp(tuple.key, "use") == 0) {
+        LOG("use"CR);
+        // without a value, duplex with default input/output
+        // otherwise, expects two values, input hash/output hash
+        // CREATE a "active" table to hold the context/config/device
+      } else if (strcmp(tuple.key, "record") == 0) {
+        LOG("record"CR);
+        // expects a sample count, returns the array after it's captured
+      } else if (strcmp(tuple.key, "play") == 0) {
+        LOG("play"CR);
+        // expects a sample array
         // more command ideas
         // 44100 16bit signed 1 channel
         // store-0 [] - stores inside exaudio
@@ -643,6 +652,8 @@ int main(int argc, char *argv[]) {
     HASH_ITER(hh, contexts, cur_ctx, tmp_ctx) {
     LOG("remove context %d"CR, cur_ctx->id);
     HASH_DEL(contexts, cur_ctx);
+    LOG("=> ma_context_uninit %p"CR, cur_ctx->ctx);
+    ma_context_uninit(cur_ctx->ctx);
     free(cur_ctx);
   }
 
