@@ -57,6 +57,11 @@ iex(3)> a = :erlang.term_to_binary([1,2,3,5,6,7,8,9,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 <<131, 80, 0, 0, 0, 27, 120, 156, 203, 102, 144, 96, 100, 98, 102, 101, 99, 231,
   224, 100, 64, 3, 0, 16, 211, 0, 173>>
 
+080 000 000 000 027 120 156 203 102 144 096 100 098 102 101 099 231 224 100 064 003 000 016 211 000 173
+ZLB L3  L2  L1  L0  78  9C
+    27 bytes------- ZMAGIC
+    make a buffer to decompress to that's 27 bytes
+
 iex(6)> b = :erlang.binary_to_term a
 [1, 2, 3, 5, 6, 7, 8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
@@ -417,7 +422,7 @@ void cleaner(void) {
 // or-ed with 0x1000 for outputs or 0x2000
 
 #define H12SEED (0x0c1)
-int hash12(char *s) {
+int hash12(char *s, int mask) {
   int acc = H12SEED;
   if (!s) return 0;
   uint8_t *b = s;
@@ -428,7 +433,7 @@ int hash12(char *s) {
     b++;
     n++;
   }
-  return acc;
+  return acc | mask;
 }
 
 #define OUTPUT_HASH_MASK (0x1000)
@@ -451,6 +456,7 @@ struct s_context {
 
 struct s_device {
   int ctxid;
+  int type; // this assumes the hash mask used to distinguish between input/output
   ma_device *dev;
   ma_device_id *devid;
   int devindex;
@@ -471,8 +477,8 @@ void devinfo(void) {
     if (s->attached) attached = "ATTACHED";
     char *isdefault = "";
     if (s->isDefault) isdefault = "DEFAULT";
-    LOG("%d,<<%s>> %s %s %s [%d]"CR,
-      s->id, s->name,
+    LOG("%d,<<%s>> %04x %s %s %s [%d]"CR,
+      s->id, s->name, s->type,
       type, attached, isdefault, s->ctxid);
   }
 }
@@ -517,14 +523,14 @@ void scan_devices(void) {
     return;
   }
 
+  int new_or_reattached_devices = 0;
+
   if (ma_context_get_devices(ctx,
     &top[DEV_INFO_OUT].info, &top[DEV_INFO_OUT].count,
     &top[DEV_INFO_IN].info, &top[DEV_INFO_IN].count) != MA_SUCCESS) {
     LOG("failed to get I/O device list"CR);
     goto clean;
   }
-
-  int new_or_reattached_devices = 0;
 
   // clear visited flag so we can detect if a device was removed
   struct s_device *s;
@@ -538,11 +544,12 @@ void scan_devices(void) {
     for (int i=0; i<count; i++) {
       ma_device_info *info = &top[which].info[i];
       char *name = info->name;
-      int h12 = hash12(name) | hash_mask;
+      int h12 = hash12(name, hash_mask);
       struct s_device *s = find_device(h12);
       if (!s) {
         s = malloc(sizeof *s);
         s->id = h12;
+        s->type = hash_mask;
         s->ctxid = ctx_count;
         LOG("attach %d"CR, h12);
         strcpy(s->name, name);
@@ -574,6 +581,7 @@ void scan_devices(void) {
   }
 
   devinfo();
+
   clean:
 
   if (new_or_reattached_devices) {
