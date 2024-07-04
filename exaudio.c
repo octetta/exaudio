@@ -447,12 +447,18 @@ static int ctx_count = 0;
 
 struct s_context {
   int id;
-  int visited;
+  int refs;
   ma_context *ctx;
   void (*data_cb)(ma_device*, void*, const void*, ma_uint32);
   void (*notify_cb)(const ma_device_notification*);
   UT_hash_handle hh;
 } *contexts = NULL;
+
+struct s_context *find_context(int id) {
+  struct s_context *ctx;
+  HASH_FIND_INT(contexts, &id, ctx);
+  return ctx;
+}
 
 struct s_device {
   int ctxid;
@@ -484,9 +490,9 @@ void devinfo(void) {
 }
 
 struct s_device *find_device(int id) {
-  struct s_device *s;
-  HASH_FIND_INT(devices, &id, s);
-  return s;
+  struct s_device *dev;
+  HASH_FIND_INT(devices, &id, dev);
+  return dev;
 }
 
 ma_device_info *out_info;
@@ -532,50 +538,53 @@ void scan_devices(void) {
     goto clean;
   }
 
+  struct s_device *dev;
+
   // clear visited flag so we can detect if a device was removed
-  struct s_device *s;
-  for (s = devices; s != NULL; s = s->hh.next) {
-    s->visited = 0;
+  for (dev = devices; dev != NULL; dev = dev->hh.next) {
+    dev->visited = 0;
   }
+
   // scan and update, adding as necessary
   for (int which = 0; which < DEV_INFO_COUNT; which++) {
-    int hash_mask = top[which].hash_mask;
+    int type = top[which].hash_mask;
     int count = top[which].count;
     for (int i=0; i<count; i++) {
       ma_device_info *info = &top[which].info[i];
       char *name = info->name;
-      int h12 = hash12(name, hash_mask);
-      struct s_device *s = find_device(h12);
-      if (!s) {
-        s = malloc(sizeof *s);
-        s->id = h12;
-        s->type = hash_mask;
-        s->ctxid = ctx_count;
+      int h12 = hash12(name, type);
+      dev = find_device(h12);
+      if (!dev) {
+        dev = malloc(sizeof *dev);
+        dev->id = h12;
+        dev->type = type;
+        dev->ctxid = ctx_count;
         LOG("attach %d"CR, h12);
-        strcpy(s->name, name);
+        strcpy(dev->name, name);
         new_or_reattached_devices++;
-        HASH_ADD_INT(devices, id, s);
-      } else if (!s->attached) {
+        HASH_ADD_INT(devices, id, dev);
+      } else if (!dev->attached) {
         LOG("reattach %d"CR, h12);
-        s->ctxid = ctx_count;
+        dev->ctxid = ctx_count;
         new_or_reattached_devices++;
       }
-      s->visited = 1;
-      s->devid = &info->id;
-      s->attached = 1;
-      s->isDefault = info->isDefault;
+      dev->visited = 1;
+      dev->devid = &info->id;
+      dev->attached = 1;
+      dev->isDefault = info->isDefault;
     }
-    // clear visited flag we can tell if a device was removed
-    for (s = devices; s != NULL; s = s->hh.next) {
+
+    // check visited flag we can tell if a device was removed
+    for (dev = devices; dev != NULL; dev = dev->hh.next) {
       // make sure we match the device type (in vs out)
       // by masking with the hash_mask for this info[] table
-      if ((s->id & hash_mask) && !s->visited) {
-        LOG("detach %d"CR, s->id);
-        s->attached = 0;
+      if ((dev->type == type) && !dev->visited) {
+        LOG("detach %d"CR, dev->id);
+        dev->attached = 0;
         // this is an opportunity to mark the context table
         // in some way that it makes it easier to remove
         // unused context entries
-        s->ctxid = -1;
+        dev->ctxid = -1;
       }
     }
   }
