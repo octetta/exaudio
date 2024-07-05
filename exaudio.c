@@ -436,23 +436,37 @@ int hash12(char *s, int mask) {
   return acc | mask;
 }
 
-#define OUTPUT_HASH_MASK (0x1000)
-#define INPUT_HASH_MASK  (0x2000)
+#define TYPE_OUTPUT (0x1000)
+#define TYPE_INPUT  (0x2000)
 
 #define DEVICE_NAME_SIZE (160)
 
 #include "uthash.h"
 
-static int ctx_count = 0;
+static int ctx_id_counter = 0;
 
-struct s_context {
+static struct s_context {
   int id;
   int refs;
   ma_context *ctx;
-  void (*data_cb)(ma_device*, void*, const void*, ma_uint32);
-  void (*notify_cb)(const ma_device_notification*);
   UT_hash_handle hh;
 } *contexts = NULL;
+
+/*
+
+contexts point to devices
+
+devices point to configs
+
+configs are where the audio comes in and goes out
+
+the scan function populates the contexts
+and devices structures
+
+the api user then chooses which input and output
+which populates the configs structure
+
+*/
 
 struct s_context *find_context(int id) {
   struct s_context *ctx;
@@ -460,9 +474,10 @@ struct s_context *find_context(int id) {
   return ctx;
 }
 
-struct s_device {
+static struct s_device {
   int ctxid;
-  int type; // this assumes the hash mask used to distinguish between input/output
+  int cfgid;
+  int type; // distinguish between input/output
   ma_device *dev;
   ma_device_id *devid;
   int devindex;
@@ -474,18 +489,25 @@ struct s_device {
   UT_hash_handle hh;
 } *devices = NULL;
 
+struct s_config {
+  int id;
+  ma_device_config *cfg;
+  UT_hash_handle hh;
+} *configs = NULL;
+
 void devinfo(void) {
-  struct s_device *s;
-  for (s = devices; s != NULL; s = s->hh.next) {
+  struct s_device *dev;
+  for (dev = devices; dev != NULL; dev = dev->hh.next) {
     char *type = "INPUT";
-    if (s->id & OUTPUT_HASH_MASK) type = "OUTPUT";
+    if (dev->id & TYPE_OUTPUT) type = "OUTPUT";
     char *attached = "DETACHED";
-    if (s->attached) attached = "ATTACHED";
+    if (dev->attached) attached = "ATTACHED";
     char *isdefault = "";
-    if (s->isDefault) isdefault = "DEFAULT";
-    LOG("%d,<<%s>> %04x %s %s %s [%d]"CR,
-      s->id, s->name, s->type,
-      type, attached, isdefault, s->ctxid);
+    if (dev->isDefault) isdefault = "DEFAULT";
+    LOG("%d,<<%s>> %04x %s %s %s [%d/%d]"CR,
+      dev->id, dev->name, dev->type,
+      type, attached, isdefault,
+      dev->ctxid, dev->cfgid);
   }
 }
 
@@ -495,11 +517,6 @@ struct s_device *find_device(int id) {
   return dev;
 }
 
-ma_device_info *out_info;
-ma_uint32 out_count;
-ma_device_info *in_info;
-ma_uint32 in_count;
-
 #define DEV_INFO_OUT (0)
 #define DEV_INFO_IN (1)
 #define DEV_INFO_COUNT (2)
@@ -507,20 +524,20 @@ ma_uint32 in_count;
 struct {
   ma_device_info *info;
   ma_uint32 count;
-  int hash_mask;
+  int type;
 } top[DEV_INFO_COUNT];
 
-void scan_devices(void) {
+void scan(void) {
   static char first = 1;
   if (first) {
-    top[DEV_INFO_OUT].hash_mask = OUTPUT_HASH_MASK;
-    top[DEV_INFO_IN].hash_mask = INPUT_HASH_MASK;
+    top[DEV_INFO_OUT].type = TYPE_OUTPUT;
+    top[DEV_INFO_IN].type = TYPE_INPUT;
     first = 0;
   }
 
   ma_context *ctx = (ma_context *)malloc(sizeof(ma_context));
   
-  LOG("=> scan_devices"CR);
+  LOG("=> scan"CR);
   LOG("miniaudio version %s"CR, ma_version_string());
 
   LOG("=> ma_context_init"CR);
@@ -530,6 +547,7 @@ void scan_devices(void) {
   }
 
   int new_or_reattached_devices = 0;
+  int detached_devices = 0;
 
   if (ma_context_get_devices(ctx,
     &top[DEV_INFO_OUT].info, &top[DEV_INFO_OUT].count,
@@ -547,7 +565,7 @@ void scan_devices(void) {
 
   // scan and update, adding as necessary
   for (int which = 0; which < DEV_INFO_COUNT; which++) {
-    int type = top[which].hash_mask;
+    int type = top[which].type;
     int count = top[which].count;
     for (int i=0; i<count; i++) {
       ma_device_info *info = &top[which].info[i];
@@ -558,14 +576,15 @@ void scan_devices(void) {
         dev = malloc(sizeof *dev);
         dev->id = h12;
         dev->type = type;
-        dev->ctxid = ctx_count;
+        dev->ctxid = ctx_id_counter;
+        dev->cfgid = -1;
         LOG("attach %d"CR, h12);
         strcpy(dev->name, name);
         new_or_reattached_devices++;
         HASH_ADD_INT(devices, id, dev);
       } else if (!dev->attached) {
         LOG("reattach %d"CR, h12);
-        dev->ctxid = ctx_count;
+        dev->ctxid = ctx_id_counter;
         new_or_reattached_devices++;
       }
       dev->visited = 1;
@@ -576,15 +595,10 @@ void scan_devices(void) {
 
     // check visited flag we can tell if a device was removed
     for (dev = devices; dev != NULL; dev = dev->hh.next) {
-      // make sure we match the device type (in vs out)
-      // by masking with the hash_mask for this info[] table
       if ((dev->type == type) && !dev->visited) {
         LOG("detach %d"CR, dev->id);
         dev->attached = 0;
-        // this is an opportunity to mark the context table
-        // in some way that it makes it easier to remove
-        // unused context entries
-        dev->ctxid = -1;
+        detached_devices++;
       }
     }
   }
@@ -597,17 +611,73 @@ void scan_devices(void) {
     // create new entry in context table
     struct s_context *c = NULL;
     c = malloc(sizeof *c);
-    c->id = ctx_count;
+    c->id = ctx_id_counter;
     c->ctx = ctx;
-    c->data_cb = NULL;
-    c->notify_cb = NULL;
-    int id = ctx_count;
+    int id = ctx_id_counter;
     HASH_ADD_INT(contexts, id, c);
-    ctx_count++;
+    ctx_id_counter++;
   } else {
     LOG("=> ma_context_uninit"CR);
     ma_context_uninit(ctx);
   }
+
+  // now clean up unreferenced contexts
+  if (detached_devices) {
+    LOG("DETACHED DEVICES"CR);
+    struct s_context *cur_ctx, *tmp_ctx;
+    // reset refs
+    HASH_ITER(hh, contexts, cur_ctx, tmp_ctx) {
+      LOG("CLEAR [%d] refs"CR, cur_ctx->id);
+      cur_ctx->refs = 0;
+    }
+    struct s_device *cur_dev, *tmp_dev;
+    // count the number of devices that reference contexts
+    HASH_ITER(hh, devices, cur_dev, tmp_dev) {
+      LOG("CHECK dev [%d] ctx [%d]"CR, cur_dev->id, cur_dev->ctxid);
+      if (cur_dev->attached && cur_dev->ctxid >= 0) {
+        cur_ctx = find_context(cur_dev->ctxid);
+        if (cur_ctx) cur_ctx->refs++;
+      }
+    }
+    // remove any unused contexts
+    HASH_ITER(hh, contexts, cur_ctx, tmp_ctx) {
+      if (cur_ctx->refs == 0) {
+        // remove it
+        LOG("REMOVE ctx[%d]->refs = %d"CR, cur_ctx->id, cur_ctx->refs);
+        HASH_DEL(contexts, cur_ctx);
+        ma_context_uninit(cur_ctx->ctx);
+        free(cur_ctx); 
+      } else {
+        LOG("KEEP ctx[%d]->refs = %d"CR, cur_ctx->id, cur_ctx->refs);
+      }
+    }
+    // patch up unused contexts in devices
+    HASH_ITER(hh, devices, cur_dev, tmp_dev) {
+      if (cur_dev->attached == 0) {
+        LOG("PATCH dev [%d]"CR, cur_dev->id);
+        cur_dev->ctxid = -1;
+      }
+    }
+  }
+}
+
+//
+
+// this creates a config where the devices are attached to a callback
+// where audio is captured and/or played
+int use(int input_id, int output_id) {
+  struct s_device *input = NULL;
+  struct s_device *output = NULL;
+  if (input_id >= 0) {
+    input = find_device(input_id);
+  }
+  if (output_id >= 0) {
+    output = find_device(output_id);
+  }
+  LOG("in:%d/%s out:%d/%s"CR,
+    input_id, input->name,
+    output_id, output->name
+  );
 }
 
 //
@@ -685,11 +755,10 @@ int main(int argc, char *argv[]) {
     if (exa_parse(fdin, &tuple) == read_okay) {
       if (strcmp(tuple.key, "scan") == 0) {
         LOG("scan"CR);
-        scan_devices();
+        scan();
         writeb1(fdout, ETF_MAGIC);
         writeb1(fdout, SMALL_TUPLE_EXT);
-        // writeb1(fdout, 0); // small tuple length ... 0 means empty
-        writeb1(fdout, 1); // small tuple length
+        writeb1(fdout, 1); // small tuple length (0 means empty)
         writeb1(fdout, BINARY_EXT);
         char *res = "okay";
         writeb4(fdout, strlen(res));
@@ -707,8 +776,17 @@ int main(int argc, char *argv[]) {
         // should return {"devices",[0,1,2]}
       } else if (strcmp(tuple.key, "use") == 0) {
         LOG("use"CR);
-        // without a value, duplex with default input/output
-        // otherwise, expects two values, input hash/output hash
+        if (tuple.count == 1) {
+          // without a value, duplex with default input/output
+          LOG("use default"CR);
+        } else if (tuple.list && tuple.len == 2) {
+          // otherwise, expects two values, input id/output id
+          LOG("use %d %d"CR, tuple.list[0], tuple.list[1]);
+          int r = use(tuple.list[0], tuple.list[1]);
+        } else {
+          // ??
+        }
+
         // CREATE a "active" table to hold the context/config/device
       } else if (strcmp(tuple.key, "record") == 0) {
         LOG("record"CR);
@@ -725,6 +803,9 @@ int main(int argc, char *argv[]) {
         // record-0 frames - gets # of frames to buffer inside exaudio
         // get-0 -> sends exaudio frames to elixir
         // 8 slots : 0-7
+      } else if (strcmp(tuple.key, "exit") == 0) {
+        LOG("exit"CR);
+        break;
       } else if (strcmp(tuple.key, "log-on") == 0) {
         _exa_log_level = 1;
       } else if (strcmp(tuple.key, "log-off") == 0) {
@@ -736,13 +817,17 @@ int main(int argc, char *argv[]) {
       LOG("read error <%s>"CR, strerror(errno));
       break;
     }
+    LOG("tuple.list:%p"CR, tuple.list);
+    LOG("tuple.blob:%p"CR, tuple.blob);
   }
 
   LOG("exit receive loop"CR);
 
+  // clean up etf parsing memory
   if (tuple.blob) free(tuple.blob);
   if (tuple.list) free(tuple.list);
-
+  
+  // clean up device memory
   struct s_device *cur_dev, *tmp_dev;
     HASH_ITER(hh, devices, cur_dev, tmp_dev) {
     LOG("remove device %d"CR, cur_dev->id);
@@ -750,6 +835,7 @@ int main(int argc, char *argv[]) {
     free(cur_dev);
   }
 
+  // clean up context memory
   struct s_context *cur_ctx, *tmp_ctx;
     HASH_ITER(hh, contexts, cur_ctx, tmp_ctx) {
     LOG("remove context %d"CR, cur_ctx->id);
@@ -758,6 +844,5 @@ int main(int argc, char *argv[]) {
     ma_context_uninit(cur_ctx->ctx);
     free(cur_ctx);
   }
-
   return 0;
 }
