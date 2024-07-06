@@ -17,6 +17,23 @@ r = receive do msg -> msg end
 Port.close(p)
 ```
 
+```bash
+pstree -p $(pgrep beam)
+ls -l /proc/$(pgrep beam)/fd
+ls -l /proc/$(pgrep exaudio)/fd
+```
+
+```elixir
+# figure out if port has been orphaned
+p # should return something like #Port<0.4>
+:erlang.ports # returns an array of ports
+Enum.at(:erlang.ports, 4) # returns a specific port
+Port.close(Enum.at(:erlang.ports, 4) # close the port in question
+
+:erlang.garbage_collect() # maybe this will close the orphaned process
+:erlamg.garbage_collect(self())
+```
+
 ```elixir
 p = Port.open({:spawn, "./exaudio"}, [:binary])
 Port.command(p, :erlang.term_to_binary({"log-on"}))
