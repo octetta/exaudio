@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define FD_PRINTF_MAX (1024)
@@ -28,7 +29,7 @@ int fd_printf(int fd, const char * fmt, ...) {
 #define EXA_LOG_DEBUG (2)
 #define EXA_LOG_INFO (4)
 
-static int _exa_log_level = 0;
+static int _exa_log_level = 1;
 
 // it's only on or off for now... the defines above signal intent though...
 #define LOG(...) if (_exa_log_level) fd_printf(STDERR_FILENO, __VA_ARGS__)
@@ -141,10 +142,10 @@ Port.command(port, :erlang.term_to_binary({}))
 Port.close()
 
 {}
-131, 104, 0
+131 104 000
 
 {"info"}
-131, 104, 1, 109, 0, 0, 0, 4, 105, 110, 102, 111
+131 104 001 109 000 000 000 004 105 110 102 111
 
 {"get-outs", []}
 131 104 002 109 000 000 000 008 103 101 116 045 111 117 116 115 106
@@ -169,7 +170,7 @@ ETF STU LEN BIN L3  L2  L1  L0  i   n   f   o   BIN L3  L2  L1  L0  o   k   a   
 
 enum {
   read_okay = 100,
-  read_empty,
+  read_eof,
   read_error,
   
   read_fd_negative,
@@ -186,56 +187,60 @@ enum {
 
 } read_errors;
 
-static int _read_real_error = 0;
-
-int read_real_error(void) {
-  return _read_real_error;
+int readbn(int fd, void *m, size_t len) {
+  int origlen = len;
+  if (fd < 0) {
+    // LOG("fd=%d"CR, fd);
+    return -read_fd_negative;
+  }
+  uint8_t *c = m;
+  int n;
+  while (len > 0) {
+    n = read(fd, c++, len);
+    if (n <= 0) return n;
+    len -= n;
+  }
+  c = m;
+  // LOG("readbn(%d,%p,%d) = %d"CR, fd, m, origlen, n);
+  // if (n > 0) {
+  //   for (int i=0; i<origlen; i++) LOG("%03d ", c[i]);
+  //   LOG(CR);
+  // }
+  return origlen;
 }
 
 int readb4(int fd, uint32_t *four) {
   uint32_t n = 0;
-  int r = read(fd, &n, sizeof(uint32_t));
-  _read_real_error = r;
-  if (r < 0) return -read_error;
-  if (r == 0) return -read_empty;
-  if (r != sizeof(uint32_t)) return -read_bad_len;
+  int r = readbn(fd, &n, sizeof(uint32_t));
+  if (r <= 0) return r;
   n = be32toh(n);
   if (four) *four = n;
-  return read_okay;
+  return sizeof(uint32_t);
 }
 
 int readb2(int fd, uint16_t *two) {
   uint16_t n;
-  int r = read(fd, &n, sizeof(uint16_t));
-  _read_real_error = r;
-  if (r < 0) return -read_error;
-  if (r == 0) return -read_empty;
-  if (r != sizeof(uint16_t)) return -read_bad_len;
+  int r = readbn(fd, &n, sizeof(uint16_t));
+  if (r <= 0) return r;
   if (two) *two = be16toh(n);
-  return read_okay;
+  return sizeof(uint16_t);
 }
 
 int readb1(int fd, uint8_t *one) {
   uint8_t n = 0;
-  int r = read(fd, &n, sizeof(uint8_t));
-  _read_real_error = r;
-  if (r < 0) return -read_error;
-  if (r == 0) return -read_empty;
-  if (r != sizeof(uint8_t)) return -read_bad_len;
+  int r = readbn(fd, &n, sizeof(uint8_t));
+  if (r <= 0) return r;
   if (one) *one = n;
-  return read_okay;
+  return sizeof(uint8_t);
 }
 
 int readpast(int fd, size_t skip) {
   uint8_t ignore;
   for (int i=0; i<skip; i++) {
-    int r = read(fd, &ignore, sizeof(ignore));
-    _read_real_error = r;
-    if (r < 0) return -read_error;
-    if (r == 0) return -read_empty;
-    if (r != skip) return -read_bad_len;
+    int r = readb1(fd, &ignore);
+    if (r <= 0) return r;
   }
-  return read_okay;
+  return skip;
 }
 
 int free_list_fail(struct exa_tuple *tuple, int r) {
@@ -256,6 +261,7 @@ int exa_send(int fd, struct exa_tuple *tuple) {
 }
 
 int exa_parse(int fd, struct exa_tuple *tuple) {
+  LOG("exa_parse"CR);
   if (fd < 0) return -read_fd_negative;
   if (!tuple) return -read_null_struct;
  
@@ -274,26 +280,29 @@ int exa_parse(int fd, struct exa_tuple *tuple) {
 
   int r;
   
+  int n;
   // match magic
-  if (readb1(fd, &one) < 0 || one != ETF_MAGIC) return -read_bad_magic;
+  if ((n = readb1(fd, &one)) <= 0) return n;
+  if (one != ETF_MAGIC) return -read_bad_magic;
   // match small tuple
-  if (readb1(fd, &one) < 0 || one != SMALL_TUPLE_EXT) return -read_not_tuple;
+  if ((n = readb1(fd, &one)) <= 0) return n;
+  if (one != SMALL_TUPLE_EXT) return -read_not_tuple;
   // get tuple len
-  if (readb1(fd, &one) < 0 || one > 2) return -read_bad_tuple_len;
+  if ((n = readb1(fd, &one)) <= 0) return n;
+  if (one > 2) return -read_bad_tuple_len;
   tuple->count = one;
+  LOG("tuple->count = %d"CR, tuple->count);
   if (tuple->count == 0) return read_okay;
+  if (one > 2) return -read_bad_tuple_len;
   // match bin
-  if (readb1(fd, &one) < 0 || one != BINARY_EXT) return -read_bad_ext;
+  if ((n = readb1(fd, &one)) <= 0) return n;
+  if (one != BINARY_EXT) return -read_bad_ext;
   // match 4 byte len
-  if (readb4(fd, &four) < 0) return -read_bad_len;
+  if ((n = readb4(fd, &four)) <= 0) return n;
   uint32_t len = four;
-  uint32_t skip = 0;
-  if (len > KEY_MAX) {
-    skip = len - KEY_MAX;
-    len = KEY_MAX;
-  }
-  if (read(fd, tuple->key, len) < len) return -read_bad_len;
-  if (skip && readpast(fd, skip) < 0) return -read_bad_len;
+  if (len > KEY_MAX) return -read_bad_len;
+  if ((n = readbn(fd, tuple->key, len)) <= 0) return n;
+  if (n != len) return -read_bad_len;
 
   // make sure key is null-terminated
   tuple->key[len] = '\0';
@@ -309,29 +318,35 @@ int exa_parse(int fd, struct exa_tuple *tuple) {
   // STRING_EXT = simple list up to 65535 uint8_t
   // LIST_EXT = list of either uint8_t or int32_t
   
-  if (readb1(fd, &one) < 0) return -read_bad_ext;
+  if ((n = readb1(fd, &one)) <= 0) return n;
 
   switch (one) {
     case NIL_EXT:
       tuple->type = exa_nil;
       return read_okay;
     case SMALL_INTEGER_EXT:
-      if (readb1(fd, &one) < 0) return -read_bad_len;
+      if ((n = readb1(fd, &one)) <= 0) return n;
       tuple->type = exa_int;
       tuple->val = one;
       return read_okay;
     case INTEGER_EXT:
-      if (readb4(fd, &four) < 0) return -read_bad_len;
+      if ((n = readb4(fd, &four)) <= 0) return n;
       tuple->type = exa_int;
       tuple->val = four;
       return read_okay;
     case BINARY_EXT:
-      if (readb4(fd, &four) < 0) return -read_bad_len;
+      if ((n = readb4(fd, &four)) <= 0) return n;
       len = four;
       if (len) {
         tuple->blob = (uint8_t *)malloc((len+1) * sizeof(uint8_t));
         if (tuple->blob) {
-          if (read(fd, tuple->blob, len) != len) {
+          n = readbn(fd, tuple->blob, len);
+          if (n <= 0) {
+            free(tuple->blob);
+            tuple->blob = NULL;
+            return n;
+          }
+          if (n != len) {
             free(tuple->blob);
             tuple->blob = NULL;
             return -read_bad_len;
@@ -344,13 +359,20 @@ int exa_parse(int fd, struct exa_tuple *tuple) {
       }
       break;
     case STRING_EXT:
-      if (readb2(fd, &two) < 0) return -read_bad_len;
+      if ((n = readb2(fd, &two)) <= 0) return n;
       len = two;
       if (len) {
         tuple->list = (int32_t *)malloc(len * sizeof(int32_t));
         if (tuple->list) {
           for (int i=0; i<len; i++) {
-            if (readb1(fd, &one) < 0) return free_list_fail(tuple, -read_bad_val);
+            if ((n = readb1(fd, &one)) <= 0) {
+              free_list_fail(tuple, -read_bad_val);
+              return n;
+            }
+            if ((n = readb1(fd, &one)) <= 0) {
+              free_list_fail(tuple, -read_bad_val);
+              return n;
+            }
             tuple->list[i] = one;
           }
           tuple->type = exa_list;
@@ -360,29 +382,48 @@ int exa_parse(int fd, struct exa_tuple *tuple) {
       }
       break;
     case LIST_EXT:
-      if (readb4(fd, &four) < 0) return -read_bad_len;
+      if ((n = readb4(fd, &four)) <= 0) return n;
       len = four;
       if (len) {
         tuple->list = (int32_t *)malloc(len * sizeof(int32_t));
         if (tuple->list) {
           for (int i=0; i<len; i++) {
-            int32_t n = 0;
-            if (readb1(fd, &one) < 0) return free_list_fail(tuple, -read_bad_ext);
+            int32_t num = 0;
+            // get type
+            if ((n = readb1(fd, &one)) <= 0) {
+              free_list_fail(tuple, -read_bad_ext);
+              return n;
+            }
+            // take next step based on type
             if (one == SMALL_INTEGER_EXT) {
-              if (readb1(fd, &one) < 0) return free_list_fail(tuple, -read_bad_val);
-              n = one;
+              if ((n = readb1(fd, &one)) <= 0) {
+                free_list_fail(tuple, -read_bad_val);
+                return n;
+              }
+              num = one;
             } else if (one == INTEGER_EXT) {
-              if (readb4(fd, &four) < 0) return free_list_fail(tuple, -read_bad_val);
-              n = four;
+              if (readb4(fd, &four) <= 0) {
+                free_list_fail(tuple, -read_bad_val);
+                return n;
+              }
+              num = four;
             } else {
               LOG("unexpected %d"CR, one);
-              return free_list_fail(tuple, -read_bad_ext);
+              free_list_fail(tuple, -read_bad_ext);
+              return -read_bad_ext;
             }
-            LOG("[%d] = %d"CR, i, n);
-            tuple->list[i] = n;
+            LOG("[%d] = %d"CR, i, num);
+            tuple->list[i] = num;
           }
-          if (readb1(fd, &one) < 0) return free_list_fail(tuple, -read_bad_ext);
-          if (one != NIL_EXT) return free_list_fail(tuple, -read_bad_ext);
+          // get end of list nil
+          if ((n = readb1(fd, &one)) <= 0) {
+            free_list_fail(tuple, -read_bad_ext);
+            return n;
+          }
+          if (one != NIL_EXT) {
+            free_list_fail(tuple, -read_bad_ext);
+            return -read_bad_ext;
+          }
           tuple->type = exa_list;
           tuple->len = len;
           return read_okay;
@@ -728,7 +769,10 @@ int writeb4(int fd, uint32_t w) {
 
 //
 
+struct termios orig_termios;
+
 int main(int argc, char *argv[]) {
+  LOG("exaudio"CR);
   atexit(cleaner);
 
   struct exa_tuple tuple;
@@ -739,6 +783,19 @@ int main(int argc, char *argv[]) {
   tuple.len = 0;
   tuple.count = 0;
 
+  // tcgetattr(STDIN_FILENO, &orig_termios);
+
+  // struct termios raw;
+  // tcgetattr(STDIN_FILENO, &raw);
+
+  // raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  // raw.c_oflag &= ~(OPOST);
+  // raw.c_cflag |= (CS8);
+  // raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  // raw.c_cc[VMIN] = 0;
+  // raw.c_cc[VTIME] = 1;
+  // tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
   int fdin = STDIN_FILENO;
   int fdout = STDOUT_FILENO;
 
@@ -746,14 +803,17 @@ int main(int argc, char *argv[]) {
 
   // if elixir dies, our parent changes... so quit
   // if elixir closes us, reads from stdin return 0... so quit
-
   while (1) {
     if (parent != getppid()) {
       LOG("parent changed!"CR);
       break;
     }
-    if (exa_parse(fdin, &tuple) == read_okay) {
-      if (strcmp(tuple.key, "scan") == 0) {
+    int n = exa_parse(fdin, &tuple);
+    if (n == read_okay) {
+      LOG("read_okay"CR);
+      if (tuple.count == 0) {
+        LOG("{}"CR);
+      } else if (strcmp(tuple.key, "scan") == 0) {
         LOG("scan"CR);
         scan();
         writeb1(fdout, ETF_MAGIC);
@@ -813,9 +873,12 @@ int main(int argc, char *argv[]) {
       } else {
         exa_dump(&tuple);
       }
-    } else if (read_real_error() <= 0) {
+    } else if (n <= 0) {
       LOG("read error <%s>"CR, strerror(errno));
       break;
+    } else {
+      LOG("WAT?"CR);
+      exa_dump(&tuple);
     }
     LOG("tuple.list:%p"CR, tuple.list);
     LOG("tuple.blob:%p"CR, tuple.blob);

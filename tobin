@@ -1,0 +1,9 @@
+#!/bin/bash
+[ "$1" = "" ] && exit
+for i in $*
+do
+  echo $i | awk '{ a=sprintf("%s%c", a, $1+0); } END { printf("%s", a); }'
+done
+# | nc -u localhost 12345
+# done | xclip -i
+# done | xxd -g 1
