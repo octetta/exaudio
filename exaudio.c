@@ -259,6 +259,26 @@ int exa_send(int fd, struct exa_tuple *tuple) {
   return write_okay;
 }
 
+/*
+  goal to parse
+  {}
+  {"key"}
+  {"key", number}
+  {"key", number, number}
+  {"key", number, []}
+  {"key", number, [0,1,2]}
+  {"key", number, [-1,1024]}
+
+  examples
+  {"capture"}
+  {"capture", devid}
+  {"buffer", size}
+  {"record", devid, bufid}
+  {"play", devid, bufid}
+  {"store", bufid, [0,1,2]}
+  {"store", bufid, [-1000,1000]}
+*/
+
 int exa_parse(int fd, struct exa_tuple *tuple) {
   LOG("exa_parse"CR);
   if (fd < 0) return -read_fd_negative;
@@ -535,18 +555,6 @@ static struct s_device {
   UT_hash_handle hh;
 } *devices = NULL;
 
-struct s_config {
-  int id;
-  ma_device_config *cfg;
-  UT_hash_handle hh;
-} *configs = NULL;
-
-struct s_config *find_config(int id) {
-  struct s_config *cfg;
-  HASH_FIND_INT(configs, &id, cfg);
-  return cfg;
-}
-
 void devinfo(void) {
   struct s_device *dev;
   for (dev = devices; dev != NULL; dev = dev->hh.next) {
@@ -572,21 +580,22 @@ struct s_device *find_device(int id) {
   return dev;
 }
 
-#define DEV_INFO_OUT (0)
-#define DEV_INFO_IN (1)
-#define DEV_INFO_COUNT (2)
+#define EXA_INFO_PLAYBACK (0)
+#define EXA_INFO_CAPTURE (1)
+#define EXA_INFO_COUNT (2)
 
 struct {
   ma_device_info *info;
   ma_uint32 count;
   int type;
-} top[DEV_INFO_COUNT];
+  int defaultid;
+} exa_info[EXA_INFO_COUNT];
 
 void scan(void) {
   static char first = 1;
   if (first) {
-    top[DEV_INFO_OUT].type = TYPE_PLAYBACK;
-    top[DEV_INFO_IN].type = TYPE_CAPTURE;
+    exa_info[EXA_INFO_PLAYBACK].type = TYPE_PLAYBACK;
+    exa_info[EXA_INFO_CAPTURE].type = TYPE_CAPTURE;
     first = 0;
   }
 
@@ -605,8 +614,8 @@ void scan(void) {
   int detached_devices = 0;
 
   if (ma_context_get_devices(ctx,
-    &top[DEV_INFO_OUT].info, &top[DEV_INFO_OUT].count,
-    &top[DEV_INFO_IN].info, &top[DEV_INFO_IN].count) != MA_SUCCESS) {
+    &exa_info[EXA_INFO_PLAYBACK].info, &exa_info[EXA_INFO_PLAYBACK].count,
+    &exa_info[EXA_INFO_CAPTURE].info, &exa_info[EXA_INFO_CAPTURE].count) != MA_SUCCESS) {
     LOG("failed to get I/O device list"CR);
     goto clean;
   }
@@ -619,11 +628,12 @@ void scan(void) {
   }
 
   // scan and update, adding as necessary
-  for (int which = 0; which < DEV_INFO_COUNT; which++) {
-    int type = top[which].type;
-    int count = top[which].count;
+  for (int which = 0; which < EXA_INFO_COUNT; which++) {
+    exa_info[which].defaultid = -1; // this should be filled in during the scan
+    int type = exa_info[which].type;
+    int count = exa_info[which].count;
     for (int i=0; i<count; i++) {
-      ma_device_info *info = &top[which].info[i];
+      ma_device_info *info = &exa_info[which].info[i];
       char *name = info->name;
       int h12 = hash12(name, type);
       dev = find_device(h12);
@@ -650,6 +660,7 @@ void scan(void) {
       // dev->devid = &info->id;
       dev->attached = 1;
       dev->isDefault = info->isDefault;
+      if (dev->isDefault) exa_info[which].defaultid = dev->id;
     }
 
     // check visited flag we can tell if a device was removed
@@ -718,6 +729,9 @@ void scan(void) {
       }
     }
   }
+
+  LOG("default playback:%d"CR, exa_info[EXA_INFO_PLAYBACK].defaultid);
+  LOG("default  capture:%d"CR, exa_info[EXA_INFO_CAPTURE].defaultid);
 }
 
 //
@@ -811,6 +825,56 @@ struct termios orig_termios;
 
 #define PERIOD_IN_FRAMES (1024)
 
+// maybe id is enough, since the device knows its type
+// maybe rename to int use(int id)
+int assign(int id, int type) {
+  struct s_device *this = find_device(id);
+  if (this && this->ctxid >= 0 && this->type == type) {
+    if (this->assigned) {
+      LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
+    } else {
+      struct s_context *ctx = find_context(this->ctxid);
+      if (!ctx) {
+        LOG("uh-oh, ctx is null"CR);
+      } else {
+        // WHAT is the life cycle when things disappear?
+        // WHAT needs cleanup?
+        if (type == TYPE_CAPTURE) {
+          this->cfg = ma_device_config_init(ma_device_type_capture);
+          this->cfg.capture.format = ma_format_s16;
+          this->cfg.capture.channels = 1;
+        } else {
+          this->cfg = ma_device_config_init(ma_device_type_playback);
+          this->cfg.playback.format = ma_format_s16;
+          this->cfg.playback.channels = 1;
+        }
+        this->cfg.periodSizeInFrames = PERIOD_IN_FRAMES;
+        // this->cfg.periodSizeInMilliseconds = 10;
+        this->cfg.sampleRate = 44100;
+        this->cfg.dataCallback = data_cb;
+        this->cfg.notificationCallback = notification_cb;
+        this->cfg.pUserData = this; // should point to something useful, trying struct s_device
+        ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
+        if (r != MA_SUCCESS) {
+          LOG("failed to initialize device"CR);
+        } else {
+          r = ma_device_start(&this->dev);
+          if (r != MA_SUCCESS) {
+            LOG("failed to start device"CR);
+            ma_device_uninit(&this->dev);
+          } else {
+            this->assigned = 1;
+            LOG("OKAY"CR);
+          }
+        }
+      }
+    }
+  } else {
+    LOG("FAIL"CR);
+  } 
+  return -1;
+}
+
 int main(int argc, char *argv[]) {
   LOG("exaudio"CR);
   atexit(cleaner);
@@ -841,6 +905,9 @@ int main(int argc, char *argv[]) {
 
   pid_t parent = getppid();
 
+  // populate devices on startup
+  scan();
+
   // if elixir dies, our parent changes... so quit
   // if elixir closes us, reads from stdin return 0... so quit
   while (1) {
@@ -866,105 +933,34 @@ int main(int argc, char *argv[]) {
         /*
           should return something like
           {"scan", [
-            [ id0#, "name0", [ :playback, :detached ] ],
-            [ id1#, "name1", [ :capture, :attached, :default, :running ] ],
+            { "name0", id0#, status0#, [ :playback, :detached ] },
+            { "name1", id1#, status1#, [ :capture, :attached, :default, :running ] },
           ]}
         */
       } else if (strcmp(tuple.key, "capture") == 0) {
+        // maybe {"use", id} is enough?
+        // for the {"use"} case, it could setup the default capture and playback?
         if (tuple.count == 1) {
           LOG("capture default"CR);
+          assign(exa_info[EXA_INFO_CAPTURE].defaultid, TYPE_CAPTURE);
         } else {
           LOG("capture %d"CR, tuple.val);
-          struct s_device *this = find_device(tuple.val);
-          if (this && this->ctxid >= 0 && this->type == TYPE_CAPTURE) {
-            if (this->assigned) {
-              LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
-            } else {
-              struct s_context *ctx = find_context(this->ctxid);
-              if (!ctx) {
-                LOG("uh-oh, ctx is null"CR);
-                continue;
-              }
-              this->cfg = ma_device_config_init(ma_device_type_capture);
-              // WHAT is the life cycle when things disappear?
-              // WHAT needs cleanup?
-              this->cfg.capture.format = ma_format_s16;
-              this->cfg.periodSizeInFrames = PERIOD_IN_FRAMES;
-              // this->cfg.periodSizeInMilliseconds = 10;
-              this->cfg.capture.channels = 1;
-              this->cfg.sampleRate = 44100;
-              this->cfg.dataCallback = data_cb;
-              this->cfg.notificationCallback = notification_cb;
-              this->cfg.pUserData = this; // should point to something useful, trying struct s_device
-              ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
-              if (r != MA_SUCCESS) {
-                LOG("failed to initialize capture device"CR);
-              } else {
-                r = ma_device_start(&this->dev);
-                if (r != MA_SUCCESS) {
-                  LOG("failed to start capture device"CR);
-                  ma_device_uninit(&this->dev);
-                } else {
-                  this->assigned = 1;
-                  LOG("OKAY"CR);
-                }
-              }
-            }
-          } else {
-            LOG("FAIL"CR);
-          }
+          assign(tuple.val, TYPE_CAPTURE);
         }
       } else if (strcmp(tuple.key, "playback") == 0) {
         if (tuple.count == 1) {
           LOG("playback default"CR);
+          assign(exa_info[EXA_INFO_PLAYBACK].defaultid, TYPE_PLAYBACK);
         } else {
           LOG("playback %d"CR, tuple.val);
-          struct s_device *this = find_device(tuple.val);
-          if (this && this->ctxid >= 0 && this->type == TYPE_PLAYBACK) {
-            if (this->assigned) {
-              LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
-            } else {
-              struct s_context *ctx = find_context(this->ctxid);
-              if (!ctx) {
-                LOG("uh-oh, ctx is null"CR);
-                continue;
-              }
-              this->cfg = ma_device_config_init(ma_device_type_capture);
-              // WHAT is the life cycle when things disappear?
-              // WHAT needs cleanup?
-              this->cfg.capture.format = ma_format_s16;
-              this->cfg.periodSizeInFrames = 1024;
-              // this->cfg.periodSizeInMilliseconds = 10;
-              this->cfg.capture.channels = 1;
-              this->cfg.sampleRate = 44100;
-              this->cfg.dataCallback = data_cb;
-              this->cfg.notificationCallback = notification_cb;
-              this->cfg.pUserData = this; // should point to something useful, trying struct s_device
-              ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
-              if (r != MA_SUCCESS) {
-                LOG("failed to initialize capture device"CR);
-              } else {
-                r = ma_device_start(&this->dev);
-                if (r != MA_SUCCESS) {
-                  LOG("failed to start capture device"CR);
-                  ma_device_uninit(&this->dev);
-                } else {
-                  this->assigned = 1;
-                  LOG("OKAY"CR);
-                }
-              }
-            }
-          } else {
-            LOG("FAIL"CR);
-          }
+          assign(tuple.val, TYPE_PLAYBACK);
         }
-      } else if (strcmp(tuple.key, "duplex") == 0) {
-        if (tuple.count == 1) {
-          LOG("duplex default"CR);
-        } else {
-          LOG("duplex %d"CR, tuple.val);
-        }
-        // CREATE a "active" table to hold the context/config/device
+      // } else if (strcmp(tuple.key, "duplex") == 0) {
+      //   if (tuple.count == 1) {
+      //     LOG("duplex default"CR);
+      //   } else {
+      //     LOG("duplex %d"CR, tuple.val);
+      //   }
       } else if (strcmp(tuple.key, "record") == 0) {
         LOG("record"CR);
         // expects a sample count, returns the array after it's captured
