@@ -479,10 +479,11 @@ void cleaner(void) {
 #define SAMPLERATE (44100)
 #define CHANNELS (1)
 #define FORMAT ma_format_s16
+#define PERIOD_IN_FRAMES (4096) // 1024 sounds BAD, as the callback can't keep up
 
 // basic attempt to get a 12-bit value from a device name
 // to use as a semi-predictable ID that is
-// or-ed with 0x1000 for outputs or 0x2000
+// or-ed with 0x1000 for playback or 0x2000 for capture
 
 #define H12SEED (0x0c1)
 int hash12(char *s, int mask) {
@@ -526,7 +527,7 @@ configs are where the audio comes in and goes out
 the scan function populates the contexts
 and devices structures
 
-the api user then chooses which input and output
+the api user then chooses which capture and playback
 which populates the configs structure
 
 */
@@ -551,19 +552,19 @@ struct s_audio {
   uint32_t position; // position used by the callback
 };
 
-int16_t input_buffer_1[SAMPLERATE * CHANNELS];
-uint32_t input_len_1 = SAMPLERATE;
-int16_t output_buffer_1[SAMPLERATE * CHANNELS];
-uint32_t output_len_1 = SAMPLERATE;
+int16_t capture_buffer_1[SAMPLERATE * CHANNELS];
+uint32_t capture_len_1 = SAMPLERATE;
+int16_t playback_buffer_1[SAMPLERATE * CHANNELS];
+uint32_t playback_len_1 = SAMPLERATE;
 
-struct s_audio output_audio = {.len = SAMPLERATE, .state = audio_state_idle, .buffer = input_buffer_1};
-struct s_audio input_audio = {.len = SAMPLERATE, .state = audio_state_idle, .buffer = output_buffer_1};
-struct s_audio input_audio;
+struct s_audio playback_audio = {.len = SAMPLERATE, .state = audio_state_idle, .buffer = capture_buffer_1};
+struct s_audio capture_audio = {.len = SAMPLERATE, .state = audio_state_idle, .buffer = playback_buffer_1};
+struct s_audio capture_audio;
 
 static struct s_device {
   int ctxid;
   int cfgid;
-  int type; // distinguish between input/output
+  int type; // distinguish between capture/playback
   // ma_device *dev;
   // ma_device_id *devid;
   // int devindex;
@@ -677,9 +678,9 @@ void scan(void) {
         strcpy(dev->name, name);
         // hack for audio buffer
         if (type == TYPE_CAPTURE) {
-          dev->audio = &input_audio;
+          dev->audio = &capture_audio;
         } else if (type == TYPE_PLAYBACK) {
-          dev->audio = &output_audio;
+          dev->audio = &playback_audio;
         }
         //
         new_or_reattached_devices++;
@@ -770,18 +771,18 @@ void scan(void) {
 
 // this creates a config where the devices are attached to a callback
 // where audio is captured and/or played
-int use(int input_id, int output_id) {
-  struct s_device *input = NULL;
-  struct s_device *output = NULL;
-  if (input_id >= 0) {
-    input = find_device(input_id);
+int use(int capture_id, int playback_id) {
+  struct s_device *capture = NULL;
+  struct s_device *playback = NULL;
+  if (capture_id >= 0) {
+    capture = find_device(capture_id);
   }
-  if (output_id >= 0) {
-    output = find_device(output_id);
+  if (playback_id >= 0) {
+    playback = find_device(playback_id);
   }
   LOG("in:%d/%s out:%d/%s"CR,
-    input_id, input->name,
-    output_id, output->name
+    capture_id, capture->name,
+    playback_id, playback->name
   );
 }
 
@@ -798,6 +799,16 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
       this->data_cb_count++;
       if (playback && this->audio && this->audio->buffer && this->audio->state == audio_state_go) {
         // copy from audio buffer into device
+        int16_t *poke = (int16_t *)playback;
+        for(int i=0; i<frame_count; i++) {
+          poke[i] = this->audio->buffer[this->audio->position++];
+          if (this->audio->position >= this->audio->len) {
+            this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
+            this->audio->position = 0; // reset position
+            break;
+          }
+        }
+        /*
         uint32_t n = frame_count * CHANNELS;
         if (this->audio->position + n > this->audio->len) {
           n = this->audio->len - this->audio->position;
@@ -808,6 +819,7 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
           this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
           this->audio->position = 0; // reset position
         }
+        */
       }
       if (capture && this->audio && this->audio->buffer && this->audio->state == audio_state_go) {
         // copy from device to audio buffer
@@ -877,7 +889,6 @@ int writeb4(int fd, uint32_t w) {
 
 struct termios orig_termios;
 
-#define PERIOD_IN_FRAMES (1024)
 
 // maybe id is enough, since the device knows its type
 // maybe rename to int use(int id)
@@ -929,28 +940,69 @@ int assign(int id, int type) {
   return -1;
 }
 
-void mkwave(struct s_audio *audio, int wave, float hz, float gain) {
-//void mkwave(audio_buffer *b, float hz, float gain, char find) {
+#define SIGN(x) ((x > 0) - (x < 0))
+
+void mkwave(struct s_audio *audio, int wave, float hz, float gain, char find) {
+  if (!audio) return;
+  if (!audio->buffer) return;
+  if (audio->len == 0) return;
+
   int duration = audio->len;
-  // b->frequency = hz;
-  // b->acc = 0;
-  // b->inc = 1;
-  // b->dds_frequency = 1.0;
+  float att = gain;
+  float acc = gain;
+
+  LOG("att=%g"CR, att);
+  LOG("acc=%g"CR, acc);
+
+  float *b = (float *)malloc(duration * sizeof(float));
   float y, gy;
+
   for (int i = 0; i < duration; i++) {
     y = sin(hz * (2 * M_PI) * i / SAMPLERATE);
-    gy = y * gain;
+    gy = y * att;
     int16_t iy = (int16_t)(gy * 32767);
-    //b->data[i] = gy;
+    b[i] = gy;
     audio->buffer[i] = iy;
+    //att -= acc; // attenuate during length of wave
   }
+  char found = 0;
+  int found_index = 0;
+  if (find) {
+    // find last sample that crosses zero going positive
+    float ly;
+    char first = 1;
+    for (int i = duration-1; i >= 0; i--) {
+      float cy = b[i];
+      if (first) {
+        ly = cy;
+        first = 0;
+        continue;
+      }
+      if (ly > cy) {
+        if ((SIGN(ly) > 0) && (SIGN(cy) < 0)) {          
+          found = 1;
+          found_index = i;
+          break;
+        }
+      }
+      ly = b[i];
+    }
+  }
+  if (found) {
+    LOG("zero-cross downgoing at [%d]"CR, found_index);
+    audio->len = found_index;
+  } else {
+    LOG("didn't find zero-crossing downgoing"CR);
+  }
+  LOG("hz:%g gain:%g"CR, hz, gain);
+  free(b);
 }
 
 int main(int argc, char *argv[]) {
   LOG("exaudio"CR);
   atexit(cleaner);
 
-  mkwave(&output_audio, 0, 440, .5); // hack to test output sine wave
+  mkwave(&playback_audio, 0, 220, 1, 0); // hack to test playback sine wave
   
   struct exa_tuple tuple;
 
@@ -1053,12 +1105,12 @@ int main(int argc, char *argv[]) {
         LOG("data_cb_count:%d"CR, data_cb_count);
         LOG("data_cb_nodev:%d"CR, data_cb_nodev);
         LOG("data_cb_fail:%d"CR, data_cb_fail);
-        LOG("input state:%d"CR, input_audio.state);
-        LOG("output state:%d"CR, output_audio.state);
+        LOG("capture state:%d"CR, capture_audio.state);
+        LOG("playback state:%d"CR, playback_audio.state);
       } else if (strcmp(tuple.key, "start") == 0) {
         // either start capture or playback with buffer assigned to device
-        input_audio.state = audio_state_go;
-        output_audio.state = audio_state_go;
+        capture_audio.state = audio_state_go;
+        playback_audio.state = audio_state_go;
       } else if (strcmp(tuple.key, "exit") == 0) {
         LOG("exit"CR);
         break;
