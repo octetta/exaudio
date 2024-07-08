@@ -798,6 +798,10 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
     if (this) {
       this->data_cb_count++;
       if (playback && this->audio && this->audio->buffer && this->audio->state == audio_state_go) {
+        this->audio->state = audio_state_running;
+        // this give us a chance to trigger something at start
+      }
+      if (playback && this->audio && this->audio->buffer && this->audio->state == audio_state_running) {
         // copy from audio buffer into device
         int16_t *poke = (int16_t *)playback;
         for(int i=0; i<frame_count; i++) {
@@ -822,7 +826,21 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
         */
       }
       if (capture && this->audio && this->audio->buffer && this->audio->state == audio_state_go) {
+        this->audio->state = audio_state_running;
+        // this give us a chance to trigger something at start
+      }
+      if (capture && this->audio && this->audio->buffer && this->audio->state == audio_state_running) {
         // copy from device to audio buffer
+        int16_t *peek = (int16_t *)capture;
+        for(int i=0; i<frame_count; i++) {
+          this->audio->buffer[this->audio->position++] = peek[i];
+          if (this->audio->position >= this->audio->len) {
+            this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
+            this->audio->position = 0; // reset position
+            break;
+          }
+        }
+        /*
         uint32_t n = frame_count * CHANNELS;
         if (this->audio->position + n > this->audio->len) {
           n = this->audio->len - this->audio->position;
@@ -833,6 +851,7 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
           this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
           this->audio->position = 0; // reset position
         }
+        */
       }
     } else {
       data_cb_fail++;
