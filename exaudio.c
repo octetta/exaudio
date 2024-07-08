@@ -95,7 +95,6 @@ struct exa_tuple {
   int32_t val;
   char key[KEY_STORE];
   uint8_t count;
-  int32_t number;
   uint8_t *blob;
   int32_t *list;
   int len;
@@ -477,8 +476,8 @@ int hash12(char *s, int mask) {
   return acc | mask;
 }
 
-#define TYPE_OUTPUT (0x1000)
-#define TYPE_INPUT  (0x2000)
+#define TYPE_PLAYBACK (0x1000)
+#define TYPE_CAPTURE  (0x2000)
 
 #define DEVICE_NAME_SIZE (160)
 
@@ -519,11 +518,17 @@ static struct s_device {
   int ctxid;
   int cfgid;
   int type; // distinguish between input/output
-  ma_device *dev;
-  ma_device_id *devid;
-  int devindex;
+  // ma_device *dev;
+  // ma_device_id *devid;
+  // int devindex;
+  //
+  char assigned;
+  ma_device dev;
+  ma_device_config cfg;
+  //
   char attached;
   char visited;
+  uint64_t data_cb_count;
   int id;
   char name[DEVICE_NAME_SIZE];
   char isDefault;
@@ -536,19 +541,28 @@ struct s_config {
   UT_hash_handle hh;
 } *configs = NULL;
 
+struct s_config *find_config(int id) {
+  struct s_config *cfg;
+  HASH_FIND_INT(configs, &id, cfg);
+  return cfg;
+}
+
 void devinfo(void) {
   struct s_device *dev;
   for (dev = devices; dev != NULL; dev = dev->hh.next) {
-    char *type = "INPUT";
-    if (dev->id & TYPE_OUTPUT) type = "OUTPUT";
+    char *type = "CAPTURE";
+    if (dev->id & TYPE_PLAYBACK) type = "PLAYBACK";
     char *attached = "DETACHED";
     if (dev->attached) attached = "ATTACHED";
     char *isdefault = "";
     if (dev->isDefault) isdefault = "DEFAULT";
-    LOG("%d,<<%s>> %04x %s %s %s [%d/%d]"CR,
+    char *assigned = "";
+    if (dev->assigned) assigned = "ASSIGNED";
+    LOG("%d,<<%s>> %04x %s %s %s [%d/%d] %d %s"CR,
       dev->id, dev->name, dev->type,
       type, attached, isdefault,
-      dev->ctxid, dev->cfgid);
+      dev->ctxid, dev->cfgid,
+      dev->data_cb_count, assigned);
   }
 }
 
@@ -571,8 +585,8 @@ struct {
 void scan(void) {
   static char first = 1;
   if (first) {
-    top[DEV_INFO_OUT].type = TYPE_OUTPUT;
-    top[DEV_INFO_IN].type = TYPE_INPUT;
+    top[DEV_INFO_OUT].type = TYPE_PLAYBACK;
+    top[DEV_INFO_IN].type = TYPE_CAPTURE;
     first = 0;
   }
 
@@ -619,6 +633,10 @@ void scan(void) {
         dev->type = type;
         dev->ctxid = ctx_id_counter;
         dev->cfgid = -1;
+        dev->assigned = 0;
+        // dev->dev = NULL;
+        // dev->devid = NULL;
+        dev->data_cb_count = 0;
         LOG("attach %d"CR, h12);
         strcpy(dev->name, name);
         new_or_reattached_devices++;
@@ -629,7 +647,7 @@ void scan(void) {
         new_or_reattached_devices++;
       }
       dev->visited = 1;
-      dev->devid = &info->id;
+      // dev->devid = &info->id;
       dev->attached = 1;
       dev->isDefault = info->isDefault;
     }
@@ -674,7 +692,7 @@ void scan(void) {
     struct s_device *cur_dev, *tmp_dev;
     // count the number of devices that reference contexts
     HASH_ITER(hh, devices, cur_dev, tmp_dev) {
-      LOG("CHECK dev [%d] ctx [%d]"CR, cur_dev->id, cur_dev->ctxid);
+      //LOG("CHECK dev [%d] ctx [%d]"CR, cur_dev->id, cur_dev->ctxid);
       if (cur_dev->attached && cur_dev->ctxid >= 0) {
         cur_ctx = find_context(cur_dev->ctxid);
         if (cur_ctx) cur_ctx->refs++;
@@ -692,10 +710,10 @@ void scan(void) {
         LOG("KEEP ctx[%d]->refs = %d"CR, cur_ctx->id, cur_ctx->refs);
       }
     }
-    // patch up unused contexts in devices
+    // mark unused contexts in devices
     HASH_ITER(hh, devices, cur_dev, tmp_dev) {
       if (cur_dev->attached == 0) {
-        LOG("PATCH dev [%d]"CR, cur_dev->id);
+        LOG("MARK dev [%d] -1"CR, cur_dev->id);
         cur_dev->ctxid = -1;
       }
     }
@@ -723,12 +741,25 @@ int use(int input_id, int output_id) {
 
 //
 
+uint64_t data_cb_count = 0;
+uint64_t data_cb_nodev = 0;
+uint64_t data_cb_fail = 0;
+
 void data_cb(ma_device *pDevice, void *pOutput, const void *pInput, ma_uint32 frame_count) {
   if (pDevice) {
+    if (pDevice->pUserData) {
+      struct s_device *this = (struct s_device *)pDevice->pUserData;
+      this->data_cb_count++;
+    } else {
+      data_cb_fail++;
+    }
     if (pOutput) {
     }
     if (pInput) {
     }
+    data_cb_count++;
+  } else {
+    data_cb_nodev++;
   }
 }
 
@@ -738,18 +769,25 @@ void notification_cb(const ma_device_notification *pNotification) {
   if (pNotification) {
     switch (pNotification->type) {
       case ma_device_notification_type_started:
+        LOG("notify started %p"CR, pNotification->pDevice);
         break;
       case ma_device_notification_type_stopped:
+        LOG("notify stopped %p"CR, pNotification->pDevice);
         break;
       case ma_device_notification_type_rerouted:
+        LOG("notify rerouted %p"CR, pNotification->pDevice);
         break;
       case ma_device_notification_type_interruption_began:
+        LOG("notify interrupt began %p"CR, pNotification->pDevice);
         break;
       case ma_device_notification_type_interruption_ended:
+        LOG("notify interrupt ended %p"CR, pNotification->pDevice);
         break;
       case ma_device_notification_type_unlocked:
+        LOG("notify unlocked %p"CR, pNotification->pDevice);
         break;
       default:
+        LOG("notify unknown %p"CR, pNotification->pDevice);
         break;
     }
   } else {
@@ -770,6 +808,8 @@ int writeb4(int fd, uint32_t w) {
 //
 
 struct termios orig_termios;
+
+#define PERIOD_IN_FRAMES (1024)
 
 int main(int argc, char *argv[]) {
   LOG("exaudio"CR);
@@ -823,30 +863,107 @@ int main(int argc, char *argv[]) {
         char *res = "okay";
         writeb4(fdout, strlen(res));
         write(fdout, res, strlen(res));
-        /* should return something like
-           [
-            {"name0", id0, [:capability_atoms]},
-            {"name1", id1, [:capability_atoms]},
-            ...
-           ]
+        /*
+          should return something like
+          {"scan", [
+            [ id0#, "name0", [ :playback, :detached ] ],
+            [ id1#, "name1", [ :capture, :attached, :default, :running ] ],
+          ]}
         */
-        // init_devices();
-        // list_devices();
-        // uninit_devices();
-        // should return {"devices",[0,1,2]}
-      } else if (strcmp(tuple.key, "use") == 0) {
-        LOG("use"CR);
+      } else if (strcmp(tuple.key, "capture") == 0) {
         if (tuple.count == 1) {
-          // without a value, duplex with default input/output
-          LOG("use default"CR);
-        } else if (tuple.list && tuple.len == 2) {
-          // otherwise, expects two values, input id/output id
-          LOG("use %d %d"CR, tuple.list[0], tuple.list[1]);
-          int r = use(tuple.list[0], tuple.list[1]);
+          LOG("capture default"CR);
         } else {
-          // ??
+          LOG("capture %d"CR, tuple.val);
+          struct s_device *this = find_device(tuple.val);
+          if (this && this->ctxid >= 0 && this->type == TYPE_CAPTURE) {
+            if (this->assigned) {
+              LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
+            } else {
+              struct s_context *ctx = find_context(this->ctxid);
+              if (!ctx) {
+                LOG("uh-oh, ctx is null"CR);
+                continue;
+              }
+              this->cfg = ma_device_config_init(ma_device_type_capture);
+              // WHAT is the life cycle when things disappear?
+              // WHAT needs cleanup?
+              this->cfg.capture.format = ma_format_s16;
+              this->cfg.periodSizeInFrames = PERIOD_IN_FRAMES;
+              // this->cfg.periodSizeInMilliseconds = 10;
+              this->cfg.capture.channels = 1;
+              this->cfg.sampleRate = 44100;
+              this->cfg.dataCallback = data_cb;
+              this->cfg.notificationCallback = notification_cb;
+              this->cfg.pUserData = this; // should point to something useful, trying struct s_device
+              ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
+              if (r != MA_SUCCESS) {
+                LOG("failed to initialize capture device"CR);
+              } else {
+                r = ma_device_start(&this->dev);
+                if (r != MA_SUCCESS) {
+                  LOG("failed to start capture device"CR);
+                  ma_device_uninit(&this->dev);
+                } else {
+                  this->assigned = 1;
+                  LOG("OKAY"CR);
+                }
+              }
+            }
+          } else {
+            LOG("FAIL"CR);
+          }
         }
-
+      } else if (strcmp(tuple.key, "playback") == 0) {
+        if (tuple.count == 1) {
+          LOG("playback default"CR);
+        } else {
+          LOG("playback %d"CR, tuple.val);
+          struct s_device *this = find_device(tuple.val);
+          if (this && this->ctxid >= 0 && this->type == TYPE_PLAYBACK) {
+            if (this->assigned) {
+              LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
+            } else {
+              struct s_context *ctx = find_context(this->ctxid);
+              if (!ctx) {
+                LOG("uh-oh, ctx is null"CR);
+                continue;
+              }
+              this->cfg = ma_device_config_init(ma_device_type_capture);
+              // WHAT is the life cycle when things disappear?
+              // WHAT needs cleanup?
+              this->cfg.capture.format = ma_format_s16;
+              this->cfg.periodSizeInFrames = 1024;
+              // this->cfg.periodSizeInMilliseconds = 10;
+              this->cfg.capture.channels = 1;
+              this->cfg.sampleRate = 44100;
+              this->cfg.dataCallback = data_cb;
+              this->cfg.notificationCallback = notification_cb;
+              this->cfg.pUserData = this; // should point to something useful, trying struct s_device
+              ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
+              if (r != MA_SUCCESS) {
+                LOG("failed to initialize capture device"CR);
+              } else {
+                r = ma_device_start(&this->dev);
+                if (r != MA_SUCCESS) {
+                  LOG("failed to start capture device"CR);
+                  ma_device_uninit(&this->dev);
+                } else {
+                  this->assigned = 1;
+                  LOG("OKAY"CR);
+                }
+              }
+            }
+          } else {
+            LOG("FAIL"CR);
+          }
+        }
+      } else if (strcmp(tuple.key, "duplex") == 0) {
+        if (tuple.count == 1) {
+          LOG("duplex default"CR);
+        } else {
+          LOG("duplex %d"CR, tuple.val);
+        }
         // CREATE a "active" table to hold the context/config/device
       } else if (strcmp(tuple.key, "record") == 0) {
         LOG("record"CR);
@@ -863,6 +980,10 @@ int main(int argc, char *argv[]) {
         // record-0 frames - gets # of frames to buffer inside exaudio
         // get-0 -> sends exaudio frames to elixir
         // 8 slots : 0-7
+      } else if (strcmp(tuple.key, "dump") == 0) {
+        LOG("data_cb_count:%d"CR, data_cb_count);
+        LOG("data_cb_nodev:%d"CR, data_cb_nodev);
+        LOG("data_cb_fail:%d"CR, data_cb_fail);
       } else if (strcmp(tuple.key, "exit") == 0) {
         LOG("exit"CR);
         break;

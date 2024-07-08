@@ -31,13 +31,17 @@ Enum.at(:erlang.ports, 4) # returns a specific port
 Port.close(Enum.at(:erlang.ports, 4) # close the port in question
 
 :erlang.garbage_collect() # maybe this will close the orphaned process
-:erlamg.garbage_collect(self())
+:erlang.garbage_collect(self())
 ```
 
 ```elixir
 p = Port.open({:spawn, "./exaudio"}, [:binary])
 Port.command(p, :erlang.term_to_binary({"log-on"}))
 Port.command(p, :erlang.term_to_binary({"scan"}))
+Port.command(p, :erlang.term_to_binary({"capture", 9157}))
+Port.command(p, :erlang.term_to_binary({"playback", 4873}))
+Port.command(p, :erlang.term_to_binary({"scan"}))
+Port.command(p, :erlang.term_to_binary({"dump"}))
 {_, {:data, s}} = receive do msg -> msg end
 :erlang.binary_to_term s
 ```
