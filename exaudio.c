@@ -6,7 +6,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <termios.h>
 #include <unistd.h>
 
 #define FD_PRINTF_MAX (1024)
@@ -479,7 +478,14 @@ void cleaner(void) {
 #define SAMPLERATE (44100)
 #define CHANNELS (1)
 #define FORMAT ma_format_s16
+
+#define USE_PERIOD_IN_FRAMES
+
+#ifdef USE_PERIOD_IN_FRAMES
 #define PERIOD_IN_FRAMES (4096) // 1024 sounds BAD, as the callback can't keep up
+#else
+#define PERIOD_IN_MS (10) // I have not played with this yet
+#endif
 
 // basic attempt to get a 12-bit value from a device name
 // to use as a semi-predictable ID that is
@@ -548,8 +554,6 @@ enum {
 struct s_audio {
   uint32_t len; // allocated size
   int16_t *buffer;
-  char state;
-  uint32_t position; // position used by the callback
 };
 
 int16_t capture_buffer_1[SAMPLERATE * CHANNELS];
@@ -557,18 +561,13 @@ uint32_t capture_len_1 = SAMPLERATE;
 int16_t playback_buffer_1[SAMPLERATE * CHANNELS];
 uint32_t playback_len_1 = SAMPLERATE;
 
-struct s_audio playback_audio = {.len = SAMPLERATE, .state = audio_state_idle, .buffer = capture_buffer_1};
-struct s_audio capture_audio = {.len = SAMPLERATE, .state = audio_state_idle, .buffer = playback_buffer_1};
+struct s_audio playback_audio = {.len = SAMPLERATE, .buffer = capture_buffer_1};
+struct s_audio capture_audio = {.len = SAMPLERATE, .buffer = playback_buffer_1};
 struct s_audio capture_audio;
 
 static struct s_device {
   int ctxid;
-  int cfgid;
   int type; // distinguish between capture/playback
-  // ma_device *dev;
-  // ma_device_id *devid;
-  // int devindex;
-  //
   char assigned;
   ma_device dev;
   ma_device_config cfg;
@@ -580,26 +579,32 @@ static struct s_device {
   char name[DEVICE_NAME_SIZE];
   char isDefault;
   struct s_audio *audio;
+  uint32_t position; // position used by the callback
+  char state;
   UT_hash_handle hh;
 } *devices = NULL;
 
 void devinfo(void) {
   struct s_device *dev;
   for (dev = devices; dev != NULL; dev = dev->hh.next) {
-    char *type = "CAPTURE";
-    if (dev->id & TYPE_PLAYBACK) type = "PLAYBACK";
-    char *attached = "DETACHED";
-    if (dev->attached) attached = "ATTACHED";
+    char *type = ":capture";
+    if (dev->id & TYPE_PLAYBACK) type = ":playback";
+    char *attached = ":detached";
+    if (dev->attached) attached = ":attached";
     char *isdefault = "";
-    if (dev->isDefault) isdefault = "DEFAULT";
+    if (dev->isDefault) isdefault = ":default";
     char *assigned = "";
-    if (dev->assigned) assigned = "ASSIGNED";
-    LOG("%d,<<%s>> %04x %s %s %s [%d/%d] %d %s %p"CR,
-      dev->id, dev->name, dev->type,
-      type, attached, isdefault,
-      dev->ctxid, dev->cfgid,
-      dev->data_cb_count, assigned,
-      dev->audio);
+    if (dev->assigned) assigned = ":assigned";
+    char audio_info[1024] = "";
+    if (dev->audio) {
+      sprintf(audio_info, "{%d %d %d}", dev->audio->len, dev->position, dev->state);
+    }
+    LOG("dev:%p id:%d name:<<%s>> [%s %s %s %s] ctx:%d cb:%d %s"CR,
+      dev, dev->id, dev->name,
+      type, attached, isdefault, assigned,
+      dev->ctxid,
+      dev->data_cb_count,
+      audio_info);
   }
 }
 
@@ -671,9 +676,10 @@ void scan(void) {
         dev->id = h12;
         dev->type = type;
         dev->ctxid = ctx_id_counter;
-        dev->cfgid = -1;
         dev->assigned = 0;
         dev->data_cb_count = 0;
+        dev->position = 0;
+        dev->state = audio_state_idle;
         LOG("attach %d"CR, h12);
         strcpy(dev->name, name);
         // hack for audio buffer
@@ -797,61 +803,37 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
     struct s_device *this = (struct s_device *)pDevice->pUserData;
     if (this) {
       this->data_cb_count++;
-      if (playback && this->audio && this->audio->buffer && this->audio->state == audio_state_go) {
-        this->audio->state = audio_state_running;
+      if (playback && this->audio && this->audio->buffer && this->state == audio_state_go) {
+        this->state = audio_state_running;
         // this give us a chance to trigger something at start
       }
-      if (playback && this->audio && this->audio->buffer && this->audio->state == audio_state_running) {
+      if (playback && this->audio && this->audio->buffer && this->state == audio_state_running) {
         // copy from audio buffer into device
         int16_t *poke = (int16_t *)playback;
         for(int i=0; i<frame_count; i++) {
-          poke[i] = this->audio->buffer[this->audio->position++];
-          if (this->audio->position >= this->audio->len) {
-            this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
-            this->audio->position = 0; // reset position
+          poke[i] = this->audio->buffer[this->position++];
+          if (this->position >= this->audio->len) {
+            this->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
+            this->position = 0; // reset position
             break;
           }
         }
-        /*
-        uint32_t n = frame_count * CHANNELS;
-        if (this->audio->position + n > this->audio->len) {
-          n = this->audio->len - this->audio->position;
-        }
-        memcpy(playback, this->audio->buffer + this->audio->position, n);
-        this->audio->position += n;
-        if (n < frame_count * CHANNELS) {
-          this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
-          this->audio->position = 0; // reset position
-        }
-        */
       }
-      if (capture && this->audio && this->audio->buffer && this->audio->state == audio_state_go) {
-        this->audio->state = audio_state_running;
+      if (capture && this->audio && this->audio->buffer && this->state == audio_state_go) {
+        this->state = audio_state_running;
         // this give us a chance to trigger something at start
       }
-      if (capture && this->audio && this->audio->buffer && this->audio->state == audio_state_running) {
+      if (capture && this->audio && this->audio->buffer && this->state == audio_state_running) {
         // copy from device to audio buffer
         int16_t *peek = (int16_t *)capture;
         for(int i=0; i<frame_count; i++) {
-          this->audio->buffer[this->audio->position++] = peek[i];
-          if (this->audio->position >= this->audio->len) {
-            this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
-            this->audio->position = 0; // reset position
+          this->audio->buffer[this->position++] = peek[i];
+          if (this->position >= this->audio->len) {
+            this->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
+            this->position = 0; // reset position
             break;
           }
         }
-        /*
-        uint32_t n = frame_count * CHANNELS;
-        if (this->audio->position + n > this->audio->len) {
-          n = this->audio->len - this->audio->position;
-        }
-        memcpy(this->audio->buffer + this->audio->position, capture, n);
-        this->audio->position += n;
-        if (n < frame_count * CHANNELS) {
-          this->audio->state = audio_state_done; // 0 = idle, 1 = go, 2 = inprogress, 3 = done;
-          this->audio->position = 0; // reset position
-        }
-        */
       }
     } else {
       data_cb_fail++;
@@ -866,24 +848,25 @@ void data_cb(ma_device *pDevice, void *playback, const void *capture, ma_uint32 
 
 void notification_cb(const ma_device_notification *pNotification) {
   if (pNotification) {
+    struct s_device *dev = (struct s_device *)pNotification->pDevice->pUserData;
     switch (pNotification->type) {
       case ma_device_notification_type_started:
-        LOG("notify started %p"CR, pNotification->pDevice);
+        LOG("notify started id:%d"CR, dev->id);
         break;
       case ma_device_notification_type_stopped:
-        LOG("notify stopped %p"CR, pNotification->pDevice);
+        LOG("notify stopped id:%d"CR, dev->id);
         break;
       case ma_device_notification_type_rerouted:
-        LOG("notify rerouted %p"CR, pNotification->pDevice);
+        LOG("notify rerouted id:%d"CR, dev->id);
         break;
       case ma_device_notification_type_interruption_began:
-        LOG("notify interrupt began %p"CR, pNotification->pDevice);
+        LOG("notify interrupt began id:%d"CR, dev->id);
         break;
       case ma_device_notification_type_interruption_ended:
-        LOG("notify interrupt ended %p"CR, pNotification->pDevice);
+        LOG("notify interrupt ended id:%d"CR, dev->id);
         break;
       case ma_device_notification_type_unlocked:
-        LOG("notify unlocked %p"CR, pNotification->pDevice);
+        LOG("notify unlocked id:%d"CR, dev->id);
         break;
       default:
         LOG("notify unknown %p"CR, pNotification->pDevice);
@@ -904,58 +887,50 @@ int writeb4(int fd, uint32_t w) {
   return write(fd, &n, sizeof(uint32_t));
 }
 
-//
-
-struct termios orig_termios;
-
-
-// maybe id is enough, since the device knows its type
-// maybe rename to int use(int id)
-int assign(int id, int type) {
-  struct s_device *this = find_device(id);
-  if (this && this->ctxid >= 0 && this->type == type) {
-    if (this->assigned) {
-      LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
+int assign(struct s_device *this) {
+  if (this->assigned) {
+    LOG("uh-oh, a cfg/dev is in this %p"CR, this->dev);
+  } else {
+    struct s_context *ctx = find_context(this->ctxid);
+    if (!ctx) {
+      LOG("uh-oh, ctx is null"CR);
     } else {
-      struct s_context *ctx = find_context(this->ctxid);
-      if (!ctx) {
-        LOG("uh-oh, ctx is null"CR);
+      // WHAT is the life cycle when things disappear?
+      // WHAT needs cleanup?
+      if (this->type == TYPE_CAPTURE) {
+        this->cfg = ma_device_config_init(ma_device_type_capture);
+        this->cfg.capture.format = FORMAT;
+        this->cfg.capture.channels = CHANNELS;
       } else {
-        // WHAT is the life cycle when things disappear?
-        // WHAT needs cleanup?
-        if (type == TYPE_CAPTURE) {
-          this->cfg = ma_device_config_init(ma_device_type_capture);
-          this->cfg.capture.format = FORMAT;
-          this->cfg.capture.channels = CHANNELS;
-        } else {
-          this->cfg = ma_device_config_init(ma_device_type_playback);
-          this->cfg.playback.format = FORMAT;
-          this->cfg.playback.channels = CHANNELS;
-        }
-        this->cfg.periodSizeInFrames = PERIOD_IN_FRAMES;
-        // this->cfg.periodSizeInMilliseconds = 10;
-        this->cfg.sampleRate = 44100;
-        this->cfg.dataCallback = data_cb;
-        this->cfg.notificationCallback = notification_cb;
-        this->cfg.pUserData = this; // should point to something useful, trying struct s_device
-        ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
+        this->cfg = ma_device_config_init(ma_device_type_playback);
+        this->cfg.playback.format = FORMAT;
+        this->cfg.playback.channels = CHANNELS;
+      }
+      #ifdef USE_PERIOD_IN_FRAMES
+      this->cfg.periodSizeInFrames = PERIOD_IN_FRAMES;
+      #else
+      this->cfg.periodSizeInMilliseconds = PERIOD_IN_MS;
+      #endif
+      this->cfg.sampleRate = 44100;
+      this->cfg.dataCallback = data_cb;
+      this->cfg.notificationCallback = notification_cb;
+      this->cfg.pUserData = this; // should point to something useful, trying struct s_device
+      ma_result r = ma_device_init(ctx->ctx, &this->cfg, &this->dev);
+      if (r != MA_SUCCESS) {
+        LOG("failed to initialize device"CR);
+      } else {
+        r = ma_device_start(&this->dev);
         if (r != MA_SUCCESS) {
-          LOG("failed to initialize device"CR);
+          LOG("failed to start device"CR);
+          ma_device_uninit(&this->dev);
         } else {
-          r = ma_device_start(&this->dev);
-          if (r != MA_SUCCESS) {
-            LOG("failed to start device"CR);
-            ma_device_uninit(&this->dev);
-          } else {
-            this->assigned = 1;
-            LOG("OKAY"CR);
-          }
+          this->assigned = 1;
+          LOG("OKAY"CR);
+          return 0;
         }
       }
     }
-  } else {
-    LOG("FAIL"CR);
-  } 
+  }
   return -1;
 }
 
@@ -1031,19 +1006,6 @@ int main(int argc, char *argv[]) {
   tuple.len = 0;
   tuple.count = 0;
 
-  // tcgetattr(STDIN_FILENO, &orig_termios);
-
-  // struct termios raw;
-  // tcgetattr(STDIN_FILENO, &raw);
-
-  // raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-  // raw.c_oflag &= ~(OPOST);
-  // raw.c_cflag |= (CS8);
-  // raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-  // raw.c_cc[VMIN] = 0;
-  // raw.c_cc[VTIME] = 1;
-  // tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-
   int fdin = STDIN_FILENO;
   int fdout = STDOUT_FILENO;
 
@@ -1081,36 +1043,45 @@ int main(int argc, char *argv[]) {
             { "name1", id1#, status1#, [ :capture, :attached, :default, :running ] },
           ]}
         */
-      } else if (strcmp(tuple.key, "capture") == 0) {
-        // maybe {"use", id} is enough?
-        // for the {"use"} case, it could setup the default capture and playback?
-        if (tuple.count == 1) {
-          LOG("capture default"CR);
-          assign(exa_info[EXA_INFO_CAPTURE].defaultid, TYPE_CAPTURE);
+      } else if (strcmp(tuple.key, "list") == 0) {
+          devinfo();
+      } else if (strcmp(tuple.key, "use") == 0) {
+        if (tuple.count < 2) {
+          LOG("need a device id"CR);
         } else {
-          LOG("capture %d"CR, tuple.val);
-          assign(tuple.val, TYPE_CAPTURE);
+          struct s_device *dev = find_device(tuple.val);
+          if (!dev) {
+            LOG("invalid id"CR);
+          } else {
+            assign(dev);
+          }
         }
-      } else if (strcmp(tuple.key, "playback") == 0) {
-        if (tuple.count == 1) {
-          LOG("playback default"CR);
-          assign(exa_info[EXA_INFO_PLAYBACK].defaultid, TYPE_PLAYBACK);
+      } else if (strcmp(tuple.key, "go") == 0) {
+        // either start capture or playback with buffer assigned to device
+        if (tuple.count < 2) {
+          LOG("need a device id"CR);
         } else {
-          LOG("playback %d"CR, tuple.val);
-          assign(tuple.val, TYPE_PLAYBACK);
+          struct s_device *this = find_device(tuple.val);
+          if (!this) {
+            LOG("unknown device"CR);
+          } else {
+            LOG("go dev:%p"CR, this);
+            if (this->audio && this->audio->buffer) {
+              this->state = audio_state_go;
+            } else {
+              LOG("no audio buffer in this device"CR);
+            }
+          }
         }
-      // } else if (strcmp(tuple.key, "duplex") == 0) {
-      //   if (tuple.count == 1) {
-      //     LOG("duplex default"CR);
-      //   } else {
-      //     LOG("duplex %d"CR, tuple.val);
-      //   }
-      } else if (strcmp(tuple.key, "record") == 0) {
-        LOG("record"CR);
-        // expects a sample count, returns the array after it's captured
-      } else if (strcmp(tuple.key, "play") == 0) {
-        LOG("play"CR);
+      } else if (strcmp(tuple.key, "retrieve") == 0) {
+        LOG("retrieve"CR);
+        // needs a device id
+        // expects a sample count, returns the array after the state is done
+      } else if (strcmp(tuple.key, "store") == 0) {
+        LOG("store"CR);
+        // needs a device id
         // expects a sample array
+        // ----
         // more command ideas
         // 44100 16bit signed 1 channel
         // store-0 [] - stores inside exaudio
@@ -1124,19 +1095,14 @@ int main(int argc, char *argv[]) {
         LOG("data_cb_count:%d"CR, data_cb_count);
         LOG("data_cb_nodev:%d"CR, data_cb_nodev);
         LOG("data_cb_fail:%d"CR, data_cb_fail);
-        LOG("capture state:%d"CR, capture_audio.state);
-        LOG("playback state:%d"CR, playback_audio.state);
-      } else if (strcmp(tuple.key, "start") == 0) {
-        // either start capture or playback with buffer assigned to device
-        capture_audio.state = audio_state_go;
-        playback_audio.state = audio_state_go;
+        // LOG("capture state:%d"CR, capture_audio.state);
+        // LOG("playback state:%d"CR, playback_audio.state);
       } else if (strcmp(tuple.key, "exit") == 0) {
         LOG("exit"CR);
         break;
-      } else if (strcmp(tuple.key, "log-on") == 0) {
-        _exa_log_level = 1;
-      } else if (strcmp(tuple.key, "log-off") == 0) {
-        _exa_log_level = 0;
+      } else if (strcmp(tuple.key, "log") == 0) {
+        if (_exa_log_level == 1) _exa_log_level = 0;
+        else _exa_log_level = 1;
       } else {
         exa_dump(&tuple);
       }
